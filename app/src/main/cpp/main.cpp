@@ -17,6 +17,12 @@
 #include <string>
 #include <unistd.h>
 #include <dirent.h>
+<<<<<<< HEAD
+=======
+#include <dlfcn.h>
+#include <csignal>
+#include <fcntl.h>
+>>>>>>> 2cab7e6 (new update)
 #include <algorithm>
 #include <cctype>
 extern "C" {
@@ -27,6 +33,10 @@ extern "C" {
 #include "imgui.h"
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
+<<<<<<< HEAD
+=======
+#include "gine_addon.h"
+>>>>>>> 2cab7e6 (new update)
 
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "3gine", __VA_ARGS__)
 
@@ -321,6 +331,13 @@ struct Entity {
     V3 pos, scale; float rotY; V3 color;
     float spin, sway, shadow;  // shadow = blob shadow radius (0 = none)
     bool broken;               // script raised an error
+<<<<<<< HEAD
+=======
+    int parent = 0;            // 0 = no parent. world = parentWorld * local
+    std::string folder;        // editor grouping
+    bool hidden = false;       // editor only: not drawn while editing
+    bool locked = false;       // editor only: cannot be picked or edited
+>>>>>>> 2cab7e6 (new update)
 };
 
 static void mkdirs(const std::string& path) {
@@ -369,6 +386,41 @@ static std::string esc(std::string s) {
     for (auto& ch : s) if (ch == '"' || ch == '\\' || ch == '\n' || ch == '\r') ch = '\'';
     return s;
 }
+<<<<<<< HEAD
+=======
+
+// ---- crash log: errors and native crashes are written to crash.log with the mod that was running ----
+static std::string g_crashPath;
+static char g_currentMod[64] = "";
+static void setMod(const char* s) { snprintf(g_currentMod, sizeof g_currentMod, "%s", s ? s : ""); }
+static void logCrash(const std::string& msg) {
+    if (g_crashPath.empty()) return;
+    FILE* f = fopen(g_crashPath.c_str(), "ab");
+    if (!f) return;
+    fprintf(f, "[%ld] mod=%s : %s\n", (long)time(nullptr), g_currentMod[0] ? g_currentMod : "(none)", msg.c_str());
+    fclose(f);
+}
+static void crashHandler(int sig) {
+    if (!g_crashPath.empty()) {
+        int fd = open(g_crashPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0664);
+        if (fd >= 0) {
+            char buf[200];
+            int n = snprintf(buf, sizeof buf, "[%ld] CRASH signal %d, mod=%s\n", (long)time(nullptr), sig, g_currentMod[0] ? g_currentMod : "(none)");
+            if (n > 0) { ssize_t r = write(fd, buf, (size_t)n); (void)r; }
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+static void installCrashHandler() {
+    int sigs[] = {SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL};
+    for (int sg : sigs) signal(sg, crashHandler);
+}
+
+struct Addon { std::string id, file, dir, ext; bool enabled = true, supported = false; };
+struct NativeCb { std::string id; void (*fn)(float); };
+>>>>>>> 2cab7e6 (new update)
 
 struct Game {
     GLuint prog = 0, skyProg = 0, emptyVao = 0;
@@ -404,6 +456,19 @@ struct Game {
     std::string codeName, pendingInsert;
     std::vector<char> code;
     bool refocusCode = false;
+<<<<<<< HEAD
+=======
+    // hierarchy, scenes, addons
+    float lastDt = 0;
+    std::string sceneName = "main", snapScene, pendingScene;
+    std::string rootDir, addonsDir, internalDir, modError;
+    std::vector<std::string> reqs;      // addons the project requires (project.json)
+    std::vector<Addon> addons;
+    std::vector<NativeCb> nativeCbs;
+    std::string blockMsg;               // game build: set when required mods are missing
+    bool showAddons = false;
+    char sceneBuf[64] = {0};
+>>>>>>> 2cab7e6 (new update)
 
     const Mesh& meshOf(int id) const { return meshes[(id >= 0 && id < MESH_COUNT) ? id : 0]; }
     void init();
@@ -442,6 +507,34 @@ struct Game {
     void saveCode();
     void drawEditorUI();
     void drawMenu(ImGuiWindowFlags F);
+<<<<<<< HEAD
+=======
+    void drawAddons(ImGuiWindowFlags F);
+    // hierarchy
+    M4 worldOf(int id, int depth = 0) const;
+    V3 worldPos(const Entity& e) const;
+    V3 worldScale(const Entity& e) const;
+    bool setParent(int id, int pid);
+    void destroyEntity(int id);
+    int raycast(V3 o, V3 d, float& tHit, bool forPick) const;
+    int spawnBasic(const char* mesh, V3 p);
+    // scenes
+    std::string sceneFile(const std::string& name) const;
+    void runtimeInit();
+    void switchScene(const std::string& name);
+    std::vector<std::string> listScenes() const;
+    // addons
+    void loadRequires();
+    void saveRequires();
+    std::vector<Addon> scanAddons() const;
+    bool toggleAddon(int idx);
+    std::string checkRequires();
+    void loadAddons();
+    void loadLuaAddon(const std::string& id, const std::string& src);
+    void loadNativeAddon(const Addon& a);
+    void callMods(float dt);
+    void modErr(const std::string& id);
+>>>>>>> 2cab7e6 (new update)
 };
 static Game* G = nullptr;
 
@@ -472,6 +565,15 @@ static std::string strField(lua_State* L, int t, const char* k, const std::strin
     lua_pop(L, 1);
     return r;
 }
+<<<<<<< HEAD
+=======
+static bool boolField(lua_State* L, int t, const char* k, bool d) {
+    lua_getfield(L, t, k);
+    bool v = lua_isnil(L, -1) ? d : lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    return v;
+}
+>>>>>>> 2cab7e6 (new update)
 static Entity* entArg(lua_State* L, int i) {
     int id = (int)luaL_checkinteger(L, i);
     if (id < 1 || id > (int)G->ents.size() || !G->ents[id - 1].alive) return nullptr;
@@ -498,6 +600,13 @@ static int l_spawn(lua_State* L) {
     e.spin = numField(L, 1, "spin", 0);
     e.sway = numField(L, 1, "sway", 0);
     e.shadow = numField(L, 1, "shadow", 0);
+<<<<<<< HEAD
+=======
+    e.parent = (int)numField(L, 1, "parent", 0);
+    e.folder = strField(L, 1, "folder", "");
+    e.hidden = boolField(L, 1, "hidden", false);
+    e.locked = boolField(L, 1, "locked", false);
+>>>>>>> 2cab7e6 (new update)
     G->ents.push_back(e);
     if (G->mode == MODE_PLAY && !e.script.empty()) G->attachScript(e.id);  // objects spawned during play get their script
     lua_pushinteger(L, e.id);
@@ -518,7 +627,11 @@ static int l_find_all(lua_State* L) {
         if (e.alive && (!n || e.name == n)) { lua_pushinteger(L, e.id); lua_rawseti(L, -2, k++); }
     return 1;
 }
+<<<<<<< HEAD
 static int l_destroy(lua_State* L) { if (Entity* e = entArg(L, 1)) e->alive = false; return 0; }
+=======
+static int l_destroy(lua_State* L) { if (Entity* e = entArg(L, 1)) G->destroyEntity(e->id); return 0; }
+>>>>>>> 2cab7e6 (new update)
 static int l_set_pos(lua_State* L) {
     if (Entity* e = entArg(L, 1)) e->pos = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_optnumber(L, 4, e->pos.z)};
     return 0;
@@ -573,12 +686,69 @@ static int l_time(lua_State* L) { lua_pushnumber(L, G->t); return 1; }
 static int l_log(lua_State* L) { LOG("[lua] %s", luaL_tolstring(L, 1, nullptr)); return 0; }
 static int l_load(lua_State* L) { lua_pushboolean(L, G->runFile(luaL_checkstring(L, 1))); return 1; }
 
+<<<<<<< HEAD
+=======
+static int l_get_name(lua_State* L) { Entity* e = entArg(L, 1); if (!e) return 0; lua_pushstring(L, e->name.c_str()); return 1; }
+// engine.set_parent(id, parentId)  (0 = no parent) -> true / false (false = would create a loop)
+static int l_set_parent(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e) return 0;
+    lua_pushboolean(L, G->setParent(e->id, (int)luaL_optinteger(L, 2, 0)));
+    return 1;
+}
+static int l_get_parent(lua_State* L) { Entity* e = entArg(L, 1); if (!e) return 0; lua_pushinteger(L, e->parent); return 1; }
+static int l_get_world_pos(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e) return 0;
+    V3 p = G->worldPos(*e);
+    lua_pushnumber(L, p.x); lua_pushnumber(L, p.y); lua_pushnumber(L, p.z);
+    return 3;
+}
+static int l_get_distance(lua_State* L) {
+    Entity* a = entArg(L, 1); Entity* b = entArg(L, 2);
+    if (!a || !b) return 0;
+    V3 d = G->worldPos(*a) - G->worldPos(*b);
+    lua_pushnumber(L, std::sqrt(dot(d, d)));
+    return 1;
+}
+// engine.move_towards(id, tx, ty, tz, speed) -> true when the target is reached (speed in units per second)
+static int l_move_towards(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e) return 0;
+    V3 t = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_checknumber(L, 4)};
+    float step = (float)luaL_checknumber(L, 5) * G->lastDt;
+    V3 d = t - e->pos;
+    float len = std::sqrt(dot(d, d));
+    if (len <= step || len < 1e-6f) { e->pos = t; lua_pushboolean(L, 1); }
+    else { e->pos = e->pos + d * (step / len); lua_pushboolean(L, 0); }
+    return 1;
+}
+// engine.check_raycast(x,y,z, dx,dy,dz) -> id, distance of the nearest 3D object hit (nothing if no hit)
+static int l_check_raycast(lua_State* L) {
+    V3 o = {(float)luaL_checknumber(L, 1), (float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3)};
+    V3 d = norm({(float)luaL_checknumber(L, 4), (float)luaL_checknumber(L, 5), (float)luaL_checknumber(L, 6)});
+    float t = 0;
+    int id = G->raycast(o, d, t, false);
+    if (!id) return 0;
+    lua_pushinteger(L, id); lua_pushnumber(L, t);
+    return 2;
+}
+static int l_load_scene(lua_State* L) { G->pendingScene = luaL_checkstring(L, 1); return 0; }  // switches on the next frame
+
+>>>>>>> 2cab7e6 (new update)
 static const luaL_Reg ENGINE_FUNCS[] = {
     {"spawn", l_spawn}, {"find", l_find}, {"find_all", l_find_all}, {"destroy", l_destroy},
     {"set_pos", l_set_pos}, {"get_pos", l_get_pos}, {"move", l_move},
     {"set_scale", l_set_scale}, {"get_scale", l_get_scale},
     {"set_color", l_set_color}, {"set_rot", l_set_rot}, {"get_rot", l_get_rot},
+<<<<<<< HEAD
     {"set_text", l_set_text}, {"get_text", l_get_text},
+=======
+    {"set_text", l_set_text}, {"get_text", l_get_text}, {"get_name", l_get_name},
+    {"set_parent", l_set_parent}, {"get_parent", l_get_parent}, {"get_world_pos", l_get_world_pos},
+    {"get_distance", l_get_distance}, {"move_towards", l_move_towards}, {"check_raycast", l_check_raycast},
+    {"load_scene", l_load_scene},
+>>>>>>> 2cab7e6 (new update)
     {"camera", l_camera}, {"set_orbit", l_set_orbit}, {"touch", l_touch},
     {"screen", l_screen}, {"time", l_time}, {"log", l_log}, {"load", l_load},
     {nullptr, nullptr}};
@@ -602,6 +772,10 @@ std::string Game::readSource(const char* path) {
 void Game::luaErr(const char* where, int id) {
     status = std::string(where) + ": " + (lua_isstring(L, -1) ? lua_tostring(L, -1) : "error");
     LOG("lua %s: %s", where, status.c_str());
+<<<<<<< HEAD
+=======
+    logCrash(status);
+>>>>>>> 2cab7e6 (new update)
     lua_pop(L, 1);
     if (id > 0 && id <= (int)ents.size()) ents[id - 1].broken = true;
 }
@@ -622,6 +796,11 @@ void Game::newLua() {
     lua_setglobal(L, "engine");
     lua_newtable(L);
     lua_setfield(L, LUA_REGISTRYINDEX, "envs");  // per-object script environments, keyed by object id
+<<<<<<< HEAD
+=======
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, "mods");  // loaded Lua addons
+>>>>>>> 2cab7e6 (new update)
     updateFailed = false;
 }
 // Pushes env[fn] (raw lookup) of the script attached to object `id`. Leaves the stack unchanged if absent.
@@ -669,22 +848,50 @@ void Game::clickUI(int id) {
     }
 }
 
+<<<<<<< HEAD
+=======
+std::string Game::sceneFile(const std::string& name) const {
+    return name == "main" ? std::string("scene.lua") : "scenes/" + cleanName(name) + ".lua";
+}
+>>>>>>> 2cab7e6 (new update)
 void Game::loadScene() {
     ents.clear();
     selected = 0;
     mode = MODE_EDIT;
     orbit = true;
     newLua();
+<<<<<<< HEAD
     runFile("scene.lua");
 }
 void Game::startPlay() {
     snapshot = ents;
+=======
+    runFile(sceneFile(sceneName).c_str());
+}
+// Runs after the scene objects exist: addons, the optional global script, then the per-object scripts.
+void Game::runtimeInit() {
+    size_t n0 = ents.size();  // objects spawned later (by scripts) attach their own scripts in spawn()
+    loadAddons();
+    if (!readSource("scripts/main.lua").empty() && runFile("scripts/main.lua")) {
+        lua_getglobal(L, "start");
+        if (lua_isfunction(L, -1)) {
+            if (lua_pcall(L, 0, 0, 0) != LUA_OK) luaErr("start()", 0);
+        } else lua_pop(L, 1);
+    }
+    for (size_t i = 0; i < n0; i++)
+        if (ents[i].alive && !ents[i].script.empty()) attachScript((int)i + 1);
+}
+void Game::startPlay() {
+    snapshot = ents;
+    snapScene = sceneName;
+>>>>>>> 2cab7e6 (new update)
     snapYaw = yaw; snapPitch = pitch; snapDist = dist; snapTarget = target;
     mode = MODE_PLAY;
     orbit = true;
     touchDown = false; uiDownId = 0;
     status.clear();
     for (auto& e : ents) e.broken = false;
+<<<<<<< HEAD
     size_t n0 = ents.size();  // objects spawned by main.lua attach their own scripts in spawn()
     newLua();
     if (!readSource("scripts/main.lua").empty() && runFile("scripts/main.lua")) {  // optional global script
@@ -698,6 +905,29 @@ void Game::startPlay() {
 }
 void Game::stopPlay() {
     ents = snapshot;
+=======
+    newLua();
+    runtimeInit();
+}
+// engine.load_scene("name") while playing
+void Game::switchScene(const std::string& name) {
+    sceneName = cleanName(name);
+    if (sceneName.empty()) sceneName = "main";
+    ents.clear();
+    selected = 0;
+    touchDown = false; uiDownId = 0;
+    newLua();
+    Mode m = mode;
+    mode = MODE_EDIT;  // spawn() must not attach scripts yet: runtimeInit() does that once
+    bool found = runFile(sceneFile(sceneName).c_str());
+    mode = m;
+    if (!found) status = "Scene not found: " + sceneName;
+    runtimeInit();
+}
+void Game::stopPlay() {
+    ents = snapshot;
+    sceneName = snapScene;
+>>>>>>> 2cab7e6 (new update)
     yaw = snapYaw; pitch = snapPitch; dist = snapDist; target = snapTarget;
     if (L) { lua_close(L); L = nullptr; }
     mode = MODE_EDIT;
@@ -709,7 +939,11 @@ bool Game::inViewport(float x, float y) const {
 #ifdef GAME_MODE
     (void)x; (void)y; return true;
 #else
+<<<<<<< HEAD
     if (screen == SCREEN_MENU || codeOpen) return false;
+=======
+    if (screen == SCREEN_MENU || codeOpen || showAddons) return false;
+>>>>>>> 2cab7e6 (new update)
     float W = (float)w, H = (float)h;
     if (mode == MODE_PLAY) return !(x > 0.86f * W && y < 0.12f * H);
     return x > 0.25f * W && x < 0.70f * W && y > 0.12f * H;
@@ -735,10 +969,23 @@ void Game::init() {
     if (!sceneLoaded) {  // only the first time: the open project survives the app going to background
 #ifdef GAME_MODE
         screen = SCREEN_PROJECT;
+<<<<<<< HEAD
         loadScene();
         startPlay();
 #else
         setupBaseDir();
+=======
+        g_crashPath = fallbackDir + "crash.log";
+        installCrashHandler();
+        loadRequires();
+        blockMsg = checkRequires();
+        loadScene();
+        if (blockMsg.empty()) startPlay();
+#else
+        setupBaseDir();
+        g_crashPath = rootDir + "crash.log";
+        installCrashHandler();
+>>>>>>> 2cab7e6 (new update)
         refreshProjects();
         screen = SCREEN_MENU;
 #endif
@@ -753,6 +1000,15 @@ void Game::shutdown() {  // frees GL objects only; project and Lua state are kep
 }
 void Game::update(float dt) {
     t += dt;
+<<<<<<< HEAD
+=======
+    lastDt = dt;
+    if (!pendingScene.empty() && mode == MODE_PLAY) {
+        std::string n = pendingScene;
+        pendingScene.clear();
+        switchScene(n);
+    }
+>>>>>>> 2cab7e6 (new update)
     if (screen == SCREEN_PROJECT && mode == MODE_PLAY) {
         for (auto& e : ents) if (e.alive) e.rotY += e.spin * dt;
         if (L && !updateFailed) {
@@ -762,6 +1018,10 @@ void Game::update(float dt) {
                 if (lua_pcall(L, 1, 0, 0) != LUA_OK) { luaErr("update()", 0); updateFailed = true; }
             } else lua_pop(L, 1);
         }
+<<<<<<< HEAD
+=======
+        callMods(dt);
+>>>>>>> 2cab7e6 (new update)
         for (size_t i = 0; i < ents.size(); i++) {  // per-object update(self, dt)
             if (!ents[i].alive || ents[i].script.empty() || ents[i].broken) continue;
             int id = ents[i].id;
@@ -791,6 +1051,229 @@ int Game::uiAt(float x, float y, bool includeLabels) const {
     }
     return 0;
 }
+<<<<<<< HEAD
+=======
+// ---- hierarchy: world = parentWorld * local (matrix product, so scale/rotation of the parent carry over) ----
+M4 Game::worldOf(int id, int depth) const {
+    const Entity& e = ents[id - 1];
+    M4 L = model(e.pos, e.rotY, e.scale);
+    if (e.parent > 0 && e.parent <= (int)ents.size() && depth < 32 && e.meshId < MESH_COUNT) {
+        const Entity& p = ents[e.parent - 1];
+        if (p.alive && p.meshId < MESH_COUNT) return mul(worldOf(e.parent, depth + 1), L);
+    }
+    return L;
+}
+V3 Game::worldPos(const Entity& e) const {
+    if (e.meshId >= MESH_COUNT) return e.pos;
+    M4 w = worldOf(e.id);
+    return {w.m[12], w.m[13], w.m[14]};
+}
+V3 Game::worldScale(const Entity& e) const {
+    M4 w = worldOf(e.id);
+    return {std::sqrt(w.m[0] * w.m[0] + w.m[1] * w.m[1] + w.m[2] * w.m[2]),
+            std::sqrt(w.m[4] * w.m[4] + w.m[5] * w.m[5] + w.m[6] * w.m[6]),
+            std::sqrt(w.m[8] * w.m[8] + w.m[9] * w.m[9] + w.m[10] * w.m[10])};
+}
+bool Game::setParent(int id, int pid) {
+    if (id < 1 || id > (int)ents.size() || !ents[id - 1].alive) return false;
+    if (pid != 0) {
+        if (pid < 1 || pid > (int)ents.size() || !ents[pid - 1].alive || pid == id) return false;
+        for (int c = pid, guard = 0; c != 0 && guard < 64; guard++) {  // refuse loops
+            if (c == id) return false;
+            c = ents[c - 1].parent;
+            if (c < 1 || c > (int)ents.size()) break;
+        }
+    }
+    ents[id - 1].parent = pid;
+    return true;
+}
+void Game::destroyEntity(int id) {  // children go with their parent
+    if (id < 1 || id > (int)ents.size() || !ents[id - 1].alive) return;
+    ents[id - 1].alive = false;
+    for (size_t i = 0; i < ents.size(); i++)
+        if (ents[i].alive && ents[i].parent == id) destroyEntity((int)i + 1);
+}
+int Game::spawnBasic(const char* mesh, V3 p) {
+    Entity e;
+    e.id = (int)ents.size() + 1; e.alive = true; e.broken = false; e.meshId = 0;
+    for (int i = 0; i < KIND_COUNT; i++) if (!strcmp(mesh, MESH_NAMES[i])) e.meshId = i;
+    e.name = MESH_NAMES[e.meshId];
+    e.pos = p;
+    bool ui = e.meshId >= MESH_COUNT;
+    e.scale = ui ? V3{20, 10, 1} : V3{1, 1, 1};
+    e.color = ui ? V3{0.25f, 0.45f, 0.85f} : V3{0.8f, 0.8f, 0.8f};
+    e.rotY = 0; e.spin = 0; e.sway = 0; e.shadow = 0;
+    if (ui) e.text = e.meshId == KIND_BUTTON ? "Button" : "Label";
+    ents.push_back(e);
+    return e.id;
+}
+// Ray vs. the (world-space) box of every 3D object. forPick = editor picking (skips locked / hidden).
+int Game::raycast(V3 eye, V3 d, float& best, bool forPick) const {
+    best = 1e30f; int hit = 0;
+    for (const auto& e : ents) {
+        if (!e.alive || e.meshId >= MESH_COUNT) continue;
+        if (forPick && (e.locked || (mode == MODE_EDIT && e.hidden))) continue;
+        V3 p = worldPos(e), sc = worldScale(e);
+        float hx = sc.x * 0.5f, hz = sc.z * 0.5f;
+        if (std::fabs(e.rotY) > 1e-3f) hx = hz = 0.5f * std::sqrt(sc.x * sc.x + sc.z * sc.z);
+        float y0 = p.y + MESH_Y0[e.meshId] * sc.y, y1 = p.y + MESH_Y1[e.meshId] * sc.y;
+        float lo[3] = {p.x - hx, y0, p.z - hz}, hi[3] = {p.x + hx, y1, p.z + hz};
+        float o[3] = {eye.x, eye.y, eye.z}, dv[3] = {d.x, d.y, d.z};
+        float tmin = 0, tmax = 1e30f; bool ok = true;
+        for (int i = 0; i < 3 && ok; i++) {
+            if (std::fabs(dv[i]) < 1e-8f) { if (o[i] < lo[i] || o[i] > hi[i]) ok = false; }
+            else {
+                float t0 = (lo[i] - o[i]) / dv[i], t1 = (hi[i] - o[i]) / dv[i];
+                if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; }
+                if (t0 > tmin) tmin = t0;
+                if (t1 < tmax) tmax = t1;
+                if (tmin > tmax) ok = false;
+            }
+        }
+        if (ok && tmin < best) { best = tmin; hit = e.id; }
+    }
+    return hit;
+}
+
+// ---- addons (mods): project.json "requires", loading, per-frame callbacks ----
+void Game::loadRequires() {
+    reqs.clear();
+    std::string s = readSource("project.json");
+    size_t k = s.find("\"requires\"");
+    if (k == std::string::npos) return;
+    size_t b = s.find('[', k), e = s.find(']', b == std::string::npos ? k : b);
+    if (b == std::string::npos || e == std::string::npos) return;
+    for (size_t i = b; i < e;) {
+        size_t q1 = s.find('"', i);
+        if (q1 == std::string::npos || q1 >= e) break;
+        size_t q2 = s.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 > e) break;
+        reqs.push_back(s.substr(q1 + 1, q2 - q1 - 1));
+        i = q2 + 1;
+    }
+}
+std::string Game::checkRequires() {  // returns the names of required addons that are missing or disabled
+    std::string miss;
+#ifdef GAME_MODE
+    for (const auto& id : reqs)
+        if (readAsset(("addons/" + id + ".lua").c_str()).empty()) miss += id + " ";
+#else
+    addons = scanAddons();
+    for (const auto& id : reqs) {
+        bool ok = false;
+        for (const auto& a : addons) if (a.id == id && a.enabled && a.supported) { ok = true; break; }
+        if (!ok) miss += id + " ";
+    }
+#endif
+    return miss;
+}
+void Game::modErr(const std::string& id) {
+    std::string msg = lua_isstring(L, -1) ? lua_tostring(L, -1) : "error";
+    status = "Mod '" + id + "': " + msg;
+    logCrash(status);
+    lua_pop(L, 1);
+}
+void Game::loadLuaAddon(const std::string& id, const std::string& src) {
+    setMod(id.c_str());
+    if (luaL_loadbufferx(L, src.data(), src.size(), id.c_str(), "t") != LUA_OK || lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        modErr(id);
+        setMod("");
+        return;
+    }
+    if (lua_istable(L, -1)) {  // an addon may return { start=function() end, update=function(dt) end }
+        lua_pushstring(L, id.c_str());
+        lua_setfield(L, -2, "__id");
+        lua_getfield(L, LUA_REGISTRYINDEX, "mods");
+        lua_pushvalue(L, -2);
+        lua_rawseti(L, -2, (lua_Integer)lua_rawlen(L, -2) + 1);
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "start");
+        if (lua_isfunction(L, -1)) { if (lua_pcall(L, 0, 0, 0) != LUA_OK) modErr(id); }
+        else lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    setMod("");
+}
+// ---- native addon API (see gine_addon.h) ----
+static void apiLog(const char* s) { LOG("[mod %s] %s", g_currentMod, s); }
+static int apiSpawn(const char* mesh, float x, float y, float z) { return G->spawnBasic(mesh, {x, y, z}); }
+static void apiGetPos(int id, float* x, float* y, float* z) {
+    if (id < 1 || id > (int)G->ents.size()) return;
+    const Entity& e = G->ents[id - 1];
+    if (x) *x = e.pos.x;
+    if (y) *y = e.pos.y;
+    if (z) *z = e.pos.z;
+}
+static void apiSetPos(int id, float x, float y, float z) {
+    if (id < 1 || id > (int)G->ents.size()) return;
+    G->ents[id - 1].pos = {x, y, z};
+}
+static int apiFind(const char* n) {
+    for (const auto& e : G->ents) if (e.alive && e.name == n) return e.id;
+    return 0;
+}
+static void apiOnUpdate(void (*fn)(float)) { if (fn) G->nativeCbs.push_back({g_currentMod, fn}); }
+
+void Game::loadNativeAddon(const Addon& a) {
+    setMod(a.id.c_str());
+    // shared storage cannot be executed from: copy the library into the app's private folder first
+    std::string path = a.dir + a.file;
+    if (!internalDir.empty()) {
+        std::string data;
+        mkdirs(internalDir + "/addons_native/");
+        std::string copy = internalDir + "/addons_native/" + a.file;
+        if (readFile(path, data) && writeFile(copy, data)) path = copy;
+    }
+    void* h = dlopen(path.c_str(), RTLD_NOW);
+    if (!h) { status = "Mod '" + a.id + "': " + std::string(dlerror()); logCrash(status); setMod(""); return; }
+    GineAddonInit init = (GineAddonInit)dlsym(h, "gine_addon_init");
+    if (!init) { status = "Mod '" + a.id + "': gine_addon_init not found"; logCrash(status); dlclose(h); setMod(""); return; }
+    static GineAPI api = {1, apiLog, apiSpawn, apiGetPos, apiSetPos, apiFind, apiOnUpdate};
+    init(&api);
+    setMod("");
+}
+void Game::loadAddons() {
+    nativeCbs.clear();
+#ifdef GAME_MODE
+    for (const auto& id : reqs) {
+        std::string src = readAsset(("addons/" + id + ".lua").c_str());
+        if (!src.empty()) loadLuaAddon(id, src);
+    }
+#else
+    addons = scanAddons();
+    for (const auto& a : addons) {
+        if (!a.enabled || !a.supported) continue;  // ".disable" files are ignored
+        if (a.ext == ".lua") { std::string src; if (readFile(a.dir + a.file, src)) loadLuaAddon(a.id, src); }
+        else loadNativeAddon(a);
+    }
+#endif
+}
+void Game::callMods(float dt) {
+    if (!L) return;
+    lua_getfield(L, LUA_REGISTRYINDEX, "mods");
+    int n = (int)lua_rawlen(L, -1);
+    for (int i = 1; i <= n; i++) {
+        lua_rawgeti(L, -1, i);
+        lua_getfield(L, -1, "__id");
+        setMod(lua_isstring(L, -1) ? lua_tostring(L, -1) : "");
+        lua_pop(L, 1);
+        lua_getfield(L, -1, "update");
+        if (lua_isfunction(L, -1)) {
+            lua_pushnumber(L, dt);
+            if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+                modErr(g_currentMod);
+                lua_pushnil(L);
+                lua_setfield(L, -2, "update");  // a failing mod stops updating, the game keeps running
+            }
+        } else lua_pop(L, 1);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    for (auto& c : nativeCbs) { setMod(c.id.c_str()); c.fn(dt); }
+    setMod("");
+}
+
+>>>>>>> 2cab7e6 (new update)
 void Game::drawEntityUI() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImFont* font = ImGui::GetFont();
@@ -848,19 +1331,32 @@ void Game::render() {
         glUniform1f(uAlpha, pass == 1 ? 0.35f : 1.0f);
         for (const auto& e : ents) {
             if (!e.alive || e.meshId >= MESH_COUNT) continue;
+<<<<<<< HEAD
+=======
+            if (mode == MODE_EDIT && e.hidden) continue;
+>>>>>>> 2cab7e6 (new update)
             if (pass == 0) {
                 V3 c = e.color;
                 if (mode == MODE_EDIT && e.id == selected) {  // selection highlight
                     float k = 0.30f + 0.15f * std::sin(t * 6.f);
                     c = c * (1.f - k) + V3{1, 1, 1} * k;
                 }
+<<<<<<< HEAD
                 M4 m = model(e.pos, e.rotY, e.scale);
+=======
+                M4 m = worldOf(e.id);
+>>>>>>> 2cab7e6 (new update)
                 glUniform3f(uColor, c.x, c.y, c.z);
                 glUniform1f(uSway, e.sway);
                 glUniformMatrix4fv(uModel, 1, GL_FALSE, m.m);
                 meshOf(e.meshId).draw();
             } else if (e.shadow > 0) {
+<<<<<<< HEAD
                 M4 m = model({e.pos.x, 0.02f, e.pos.z}, 0, {e.shadow, 1, e.shadow});
+=======
+                V3 wp = worldPos(e);
+                M4 m = model({wp.x, 0.02f, wp.z}, 0, {e.shadow, 1, e.shadow});
+>>>>>>> 2cab7e6 (new update)
                 glUniform3f(uColor, 0.05f, 0.12f, 0.08f);
                 glUniform1f(uSway, 0);
                 glUniformMatrix4fv(uModel, 1, GL_FALSE, m.m);
@@ -881,7 +1377,14 @@ void Game::drawUI() {
 #ifndef GAME_MODE
     drawEditorUI();
 #else
+<<<<<<< HEAD
     if (!status.empty() && mode == MODE_PLAY)  // show script errors on screen while testing
+=======
+    if (!blockMsg.empty()) {
+        std::string m = "Cannot start: missing mods: " + blockMsg;
+        ImGui::GetForegroundDrawList()->AddText(ImGui::GetFont(), h * 0.05f, ImVec2(20, h * 0.4f), IM_COL32(255, 90, 90, 255), m.c_str());
+    } else if (!status.empty() && mode == MODE_PLAY)  // show script errors on screen
+>>>>>>> 2cab7e6 (new update)
         ImGui::GetForegroundDrawList()->AddText(ImVec2(10, 10), IM_COL32(255, 90, 90, 255), status.c_str());
 #endif
     ImGui::Render();
@@ -897,12 +1400,26 @@ static const char* DEFAULT_SCENE =
     "engine.spawn{ name=\"Cube\", mesh=\"cube\", pos={0,0.5,0}, scale={1,1,1}, color={0.95,0.75,0.25}, rot=0, spin=0, sway=0, shadow=1.4 }\n";
 
 void Game::setupBaseDir() {
+<<<<<<< HEAD
     std::string cands[2] = {"/sdcard/Documents/3gine/game/", fallbackDir};
     for (const auto& c : cands) {
         if (c.empty()) continue;
         mkdirs(c);
         std::string probe = c + ".probe";
         if (writeFile(probe, "x")) { remove(probe.c_str()); baseDir = c; return; }
+=======
+    std::string cands[2] = {"/sdcard/Documents/3gine/", fallbackDir};
+    for (const auto& c : cands) {
+        if (c.empty()) continue;
+        mkdirs(c + "game/");
+        std::string probe = c + "game/.probe";
+        if (writeFile(probe, "x")) {
+            remove(probe.c_str());
+            rootDir = c; baseDir = c + "game/"; addonsDir = c + "addons/";
+            mkdirs(addonsDir);
+            return;
+        }
+>>>>>>> 2cab7e6 (new update)
     }
     status = "No writable folder. Give 3gine Editor 'All files access' in Android settings, then restart.";
 }
@@ -920,13 +1437,25 @@ bool Game::createProject(const std::string& rawName) {
     if (fileExists(baseDir + name + "/scene.lua")) { status = "A project named '" + name + "' already exists."; return false; }
     mkdirs(baseDir + name + "/scripts/");
     if (!writeFile(baseDir + name + "/scene.lua", DEFAULT_SCENE)) { status = "Could not write " + baseDir + name; return false; }
+<<<<<<< HEAD
+=======
+    writeFile(baseDir + name + "/project.json", "{\n  \"name\": \"" + name + "\",\n  \"requires\": []\n}\n");
+>>>>>>> 2cab7e6 (new update)
     return openProject(name);
 }
 bool Game::openProject(const std::string& name) {
     projectName = name;
     projectDir = baseDir + name + "/";
     codeOpen = false;
+<<<<<<< HEAD
     status.clear();
+=======
+    showAddons = false;
+    status.clear();
+    sceneName = "main";
+    loadRequires();
+    addons = scanAddons();
+>>>>>>> 2cab7e6 (new update)
     loadScene();
     screen = SCREEN_PROJECT;
     return true;
@@ -934,13 +1463,22 @@ bool Game::openProject(const std::string& name) {
 bool Game::saveProject() {
     if (projectDir.empty()) return false;
     mkdirs(projectDir + "scripts/");
+<<<<<<< HEAD
     char buf[1024];
+=======
+    mkdirs(projectDir + "scenes/");
+    std::vector<int> remap(ents.size() + 1, 0);  // ids are re-numbered in file order; parents follow
+    int n = 0;
+    for (const auto& e : ents) if (e.alive) remap[e.id] = ++n;
+    char buf[1536];
+>>>>>>> 2cab7e6 (new update)
     std::string out = "-- 3gine scene. Generated by the editor (Save). Safe to hand-edit.\n";
     snprintf(buf, sizeof buf, "engine.camera{ yaw=%.3f, pitch=%.3f, dist=%.3f, target={%.3f,%.3f,%.3f} }\n",
              yaw, pitch, dist, target.x, target.y, target.z);
     out += buf;
     for (const auto& e : ents) {
         if (!e.alive) continue;
+<<<<<<< HEAD
         snprintf(buf, sizeof buf,
                  "engine.spawn{ name=\"%s\", mesh=\"%s\", pos={%.3f,%.3f,%.3f}, scale={%.3f,%.3f,%.3f}, "
                  "color={%.3f,%.3f,%.3f}, rot=%.3f, spin=%.3f, sway=%.3f, shadow=%.3f, text=\"%s\", script=\"%s\" }\n",
@@ -953,6 +1491,57 @@ bool Game::saveProject() {
     return true;
 }
 
+=======
+        int par = (e.parent > 0 && e.parent <= (int)ents.size()) ? remap[e.parent] : 0;
+        snprintf(buf, sizeof buf,
+                 "engine.spawn{ name=\"%s\", mesh=\"%s\", pos={%.3f,%.3f,%.3f}, scale={%.3f,%.3f,%.3f}, "
+                 "color={%.3f,%.3f,%.3f}, rot=%.3f, spin=%.3f, sway=%.3f, shadow=%.3f, text=\"%s\", script=\"%s\", "
+                 "parent=%d, folder=\"%s\", hidden=%s, locked=%s }\n",
+                 esc(e.name).c_str(), MESH_NAMES[e.meshId], e.pos.x, e.pos.y, e.pos.z, e.scale.x, e.scale.y, e.scale.z,
+                 e.color.x, e.color.y, e.color.z, e.rotY, e.spin, e.sway, e.shadow, esc(e.text).c_str(), esc(e.script).c_str(),
+                 par, esc(e.folder).c_str(), e.hidden ? "true" : "false", e.locked ? "true" : "false");
+        out += buf;
+    }
+    if (!writeFile(projectDir + sceneFile(sceneName), out)) { status = "Save failed: " + projectDir; return false; }
+    saveRequires();
+    status = "Saved";
+    return true;
+}
+void Game::saveRequires() {
+    std::string j = "{\n  \"name\": \"" + esc(projectName) + "\",\n  \"requires\": [";
+    for (size_t i = 0; i < reqs.size(); i++) j += std::string(i ? ", " : "") + "\"" + esc(reqs[i]) + "\"";
+    j += "]\n}\n";
+    writeFile(projectDir + "project.json", j);
+}
+std::vector<std::string> Game::listScenes() const {
+    std::vector<std::string> out = {"main"};
+    for (const auto& f : listDir(projectDir + "scenes/", false))
+        if (f.size() > 4 && f.compare(f.size() - 4, 4, ".lua") == 0) out.push_back(f.substr(0, f.size() - 4));
+    return out;
+}
+std::vector<Addon> Game::scanAddons() const {
+    std::vector<Addon> out;
+    if (addonsDir.empty()) return out;
+    for (const auto& f : listDir(addonsDir, false)) {
+        Addon a; a.file = f; a.dir = addonsDir; a.enabled = true;
+        std::string n = f;
+        if (n.size() > 8 && n.compare(n.size() - 8, 8, ".disable") == 0) { a.enabled = false; n = n.substr(0, n.size() - 8); }
+        size_t dot = n.rfind('.');
+        if (dot == std::string::npos) continue;
+        a.ext = n.substr(dot); a.id = n.substr(0, dot);
+        if (a.ext != ".lua" && a.ext != ".so" && a.ext != ".gpp" && a.ext != ".dll") continue;
+        a.supported = (a.ext == ".lua" || a.ext == ".so");  // .dll / .gpp cannot run on Android
+        out.push_back(a);
+    }
+    return out;
+}
+bool Game::toggleAddon(int idx) {  // enable/disable = add or remove the ".disable" suffix
+    if (idx < 0 || idx >= (int)addons.size()) return false;
+    const Addon& a = addons[idx];
+    std::string nn = a.enabled ? a.file + ".disable" : a.file.substr(0, a.file.size() - 8);
+    return rename((a.dir + a.file).c_str(), (a.dir + nn).c_str()) == 0;
+}
+>>>>>>> 2cab7e6 (new update)
 int Game::addEntity(int kind) {
     Entity e;
     e.id = (int)ents.size() + 1; e.alive = true; e.meshId = kind; e.broken = false;
@@ -1024,12 +1613,17 @@ void Game::saveCode() {
 
 void Game::pick(float sx, float sy) {
     int u = uiAt(sx, sy, true);
+<<<<<<< HEAD
     if (u) { selected = u; return; }
+=======
+    if (u && !ents[u - 1].locked) { selected = u; return; }
+>>>>>>> 2cab7e6 (new update)
     V3 eye = target + V3{std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)} * dist;
     V3 f = norm(target - eye), s = norm(cross(f, {0, 1, 0})), up = cross(s, f);
     float th = std::tan(0.45f), asp = (float)w / h;
     float nx = 2.f * sx / w - 1.f, ny = 1.f - 2.f * sy / h;
     V3 d = norm(f + s * (nx * th * asp) + up * (ny * th));
+<<<<<<< HEAD
     float best = 1e30f; int hit = 0;
     for (const auto& e : ents) {
         if (!e.alive || e.meshId >= MESH_COUNT) continue;
@@ -1052,6 +1646,10 @@ void Game::pick(float sx, float sy) {
         if (ok && tmin < best) { best = tmin; hit = e.id; }
     }
     selected = hit;
+=======
+    float t = 0;
+    selected = raycast(eye, d, t, true);
+>>>>>>> 2cab7e6 (new update)
 }
 
 static int codeCallback(ImGuiInputTextCallbackData* d) {
@@ -1102,6 +1700,45 @@ void Game::drawMenu(ImGuiWindowFlags F) {
     }
 }
 
+<<<<<<< HEAD
+=======
+void Game::drawAddons(ImGuiWindowFlags F) {
+    float W = (float)w, H = (float)h;
+    ImGui::SetNextWindowPos(ImVec2(0.08f * W, 0.10f * H));
+    ImGui::SetNextWindowSize(ImVec2(0.84f * W, 0.82f * H));
+    ImGui::Begin("Addons (mods)", nullptr, F);
+    if (ImGui::Button("Close")) showAddons = false;
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) addons = scanAddons();
+    ImGui::TextWrapped("Folder: %s", addonsDir.c_str());
+    ImGui::TextWrapped(".lua and .so addons are loaded. .dll / .gpp are PC formats and cannot run on Android. "
+                       "A disabled addon has .disable added to its file name and is ignored. "
+                       "'Required' lists it in project.json: the game will not start without it.");
+    ImGui::Separator();
+    if (addons.empty()) ImGui::TextUnformatted("No addons found. Put files into the folder above.");
+    int toggle = -1;
+    for (int i = 0; i < (int)addons.size(); i++) {
+        Addon& a = addons[i];
+        ImGui::PushID(i);
+        ImGui::Text("%s%s", a.id.c_str(), a.ext.c_str());
+        ImGui::SameLine();
+        if (!a.supported) ImGui::TextUnformatted("(not supported on Android)");
+        else if (ImGui::Button(a.enabled ? "Disable" : "Enable")) toggle = i;
+        ImGui::SameLine();
+        bool req = false;
+        for (const auto& r : reqs) if (r == a.id) req = true;
+        if (ImGui::Checkbox("Required", &req)) {
+            if (req) reqs.push_back(a.id);
+            else for (size_t k = 0; k < reqs.size(); k++) if (reqs[k] == a.id) { reqs.erase(reqs.begin() + k); break; }
+            saveRequires();
+        }
+        ImGui::PopID();
+    }
+    if (toggle >= 0) { toggleAddon(toggle); addons = scanAddons(); }
+    ImGui::End();
+}
+
+>>>>>>> 2cab7e6 (new update)
 void Game::drawEditorUI() {
     const ImGuiWindowFlags F = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
                                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
@@ -1121,6 +1758,10 @@ void Game::drawEditorUI() {
 
     bool doPlay = false, doBuild = false, doDup = false, doMenu = false, doNewScript = false, doEditScript = false;
     int doAdd = -1;
+<<<<<<< HEAD
+=======
+    std::string goScene, newScene;
+>>>>>>> 2cab7e6 (new update)
 
     // ---- top bar ----
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -1135,6 +1776,7 @@ void Game::drawEditorUI() {
         for (int i = 0; i < KIND_COUNT; i++) if (ImGui::Selectable(ADD_NAMES[i])) doAdd = i;
         ImGui::EndPopup();
     }
+<<<<<<< HEAD
     ImGui::SameLine(); ImGui::TextUnformatted(projectName.c_str());
     ImGui::SameLine(); ImGui::TextUnformatted(status.c_str());
     ImGui::End();
@@ -1147,6 +1789,48 @@ void Game::drawEditorUI() {
         if (!e.alive) continue;
         char label[160]; snprintf(label, sizeof label, "%s###e%d", e.name.c_str(), e.id);
         if (ImGui::Selectable(label, selected == e.id)) selected = e.id;
+=======
+    ImGui::SameLine(); if (ImGui::Button("Scenes")) ImGui::OpenPopup("scenespop");
+    if (ImGui::BeginPopup("scenespop")) {
+        for (const auto& sn : listScenes()) {
+            char lab[96]; snprintf(lab, sizeof lab, "%s%s###sc_%s", sn == sceneName ? "> " : "", sn.c_str(), sn.c_str());
+            if (ImGui::Selectable(lab)) goScene = sn;
+        }
+        ImGui::Separator();
+        ImGui::InputText("##newscene", sceneBuf, sizeof sceneBuf, ImGuiInputTextFlags_CharsNoBlank);
+        if (ImGui::Button("+ New scene") && cleanName(sceneBuf).size() > 0) { newScene = cleanName(sceneBuf); sceneBuf[0] = 0; }
+        ImGui::EndPopup();
+    }
+    ImGui::SameLine(); if (ImGui::Button("Mods")) { addons = scanAddons(); showAddons = true; }
+    ImGui::SameLine(); ImGui::Text("%s / %s", projectName.c_str(), sceneName.c_str());
+    ImGui::SameLine(); ImGui::TextUnformatted(status.c_str());
+    ImGui::End();
+
+    // ---- scene list (grouped by folder, children indented under their parent) ----
+    ImGui::SetNextWindowPos(ImVec2(0, topH));
+    ImGui::SetNextWindowSize(ImVec2(0.25f * W, H - topH));
+    ImGui::Begin("Scene", nullptr, F);
+    {
+        auto row = [&](const Entity& e) {
+            int depth = 0;
+            for (int c = e.parent; c > 0 && c <= (int)ents.size() && depth < 8 && e.meshId < MESH_COUNT; c = ents[c - 1].parent) depth++;
+            if (depth) ImGui::Indent(depth * 18.f);
+            char label[200];
+            snprintf(label, sizeof label, "%s%s%s###e%d", e.hidden ? "(H) " : "", e.locked ? "(L) " : "", e.name.c_str(), e.id);
+            if (ImGui::Selectable(label, selected == e.id)) selected = e.id;
+            if (depth) ImGui::Unindent(depth * 18.f);
+        };
+        std::vector<std::string> folders;
+        for (const auto& e : ents)
+            if (e.alive && !e.folder.empty() && std::find(folders.begin(), folders.end(), e.folder) == folders.end()) folders.push_back(e.folder);
+        for (const auto& e : ents) if (e.alive && e.folder.empty()) row(e);
+        for (const auto& f : folders) {
+            if (ImGui::TreeNode(f.c_str())) {
+                for (const auto& e : ents) if (e.alive && e.folder == f) row(e);
+                ImGui::TreePop();
+            }
+        }
+>>>>>>> 2cab7e6 (new update)
     }
     ImGui::End();
 
@@ -1157,9 +1841,21 @@ void Game::drawEditorUI() {
     Entity* se = (selected >= 1 && selected <= (int)ents.size() && ents[selected - 1].alive) ? &ents[selected - 1] : nullptr;
     if (!se) ImGui::TextWrapped("Tap an object in the scene or in the list.");
     else {
+<<<<<<< HEAD
         char tb[128];
         snprintf(tb, sizeof tb, "%s", se->name.c_str());
         if (ImGui::InputText("Name", tb, sizeof tb)) se->name = tb;
+=======
+        ImGui::Checkbox("Hide", &se->hidden);
+        ImGui::SameLine();
+        ImGui::Checkbox("Lock", &se->locked);
+        if (se->locked) ImGui::BeginDisabled();
+        char tb[128];
+        snprintf(tb, sizeof tb, "%s", se->name.c_str());
+        if (ImGui::InputText("Name", tb, sizeof tb)) se->name = tb;
+        snprintf(tb, sizeof tb, "%s", se->folder.c_str());
+        if (ImGui::InputText("Folder", tb, sizeof tb)) se->folder = tb;
+>>>>>>> 2cab7e6 (new update)
         bool isUI = se->meshId >= MESH_COUNT;
         if (isUI) {
             ImGui::DragFloat2("Pos %", &se->pos.x, 0.2f, -20.f, 120.f);
@@ -1168,6 +1864,23 @@ void Game::drawEditorUI() {
             if (ImGui::InputText("Text", tb, sizeof tb)) se->text = tb;
             ImGui::ColorEdit3("Color", &se->color.x);
         } else {
+<<<<<<< HEAD
+=======
+            std::string pn = "(none)";
+            if (se->parent >= 1 && se->parent <= (int)ents.size() && ents[se->parent - 1].alive) pn = ents[se->parent - 1].name;
+            ImGui::Text("Parent: %s", pn.c_str());
+            ImGui::SameLine();
+            if (ImGui::Button("Set")) ImGui::OpenPopup("parentpop");
+            if (ImGui::BeginPopup("parentpop")) {
+                if (ImGui::Selectable("(none)")) setParent(se->id, 0);
+                for (const auto& o : ents) {
+                    if (!o.alive || o.id == se->id || o.meshId >= MESH_COUNT) continue;
+                    char lab[200]; snprintf(lab, sizeof lab, "%s###par%d", o.name.c_str(), o.id);
+                    if (ImGui::Selectable(lab)) { if (!setParent(se->id, o.id)) status = "That would make a loop."; }
+                }
+                ImGui::EndPopup();
+            }
+>>>>>>> 2cab7e6 (new update)
             ImGui::DragFloat3("Pos", &se->pos.x, 0.05f);
             ImGui::DragFloat3("Size", &se->scale.x, 0.05f, 0.01f, 500.f);
             float deg = se->rotY * 57.29578f;
@@ -1194,10 +1907,20 @@ void Game::drawEditorUI() {
         ImGui::Separator();
         if (ImGui::Button("Duplicate")) doDup = true;
         ImGui::SameLine();
+<<<<<<< HEAD
         if (ImGui::Button("Delete")) { se->alive = false; selected = 0; }
     }
     ImGui::End();
 
+=======
+        if (ImGui::Button("Delete")) { destroyEntity(se->id); selected = 0; }
+        if (se->locked) ImGui::EndDisabled();
+    }
+    ImGui::End();
+
+    if (showAddons) drawAddons(F);
+
+>>>>>>> 2cab7e6 (new update)
     // ---- script editor (top half; the keyboard covers the lower half) ----
     if (codeOpen) {
         ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -1224,8 +1947,25 @@ void Game::drawEditorUI() {
     if (doBuild) {
         saveProject();
         writeFile(baseDir + "startup.txt", projectName + "\n");  // tells CI which project to bundle in the game APK
+<<<<<<< HEAD
         ImGui::OpenPopup("Build APK");
     }
+=======
+        mkdirs(projectDir + "addons/");  // required Lua addons travel with the game
+        addons = scanAddons();
+        for (const auto& id : reqs)
+            for (const auto& a : addons)
+                if (a.id == id && a.enabled && a.ext == ".lua") {
+                    std::string src;
+                    if (readFile(a.dir + a.file, src)) writeFile(projectDir + "addons/" + id + ".lua", src);
+                }
+        ImGui::OpenPopup("Build APK");
+    }
+    if (doPlay) {
+        std::string miss = checkRequires();
+        if (!miss.empty()) { modError = miss; doPlay = false; ImGui::OpenPopup("Mods missing"); }
+    }
+>>>>>>> 2cab7e6 (new update)
     ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(W * 0.7f, 0));
     if (ImGui::BeginPopupModal("Build APK", nullptr, ImGuiWindowFlags_NoResize)) {
@@ -1235,12 +1975,40 @@ void Game::drawEditorUI() {
         ImGui::TextWrapped("To get the game APK: open Termux in your repo and run  sh publish.sh  "
                            "GitHub Actions then compiles it; download the artifact 3gine-game-apk from the Actions page.");
         ImGui::TextWrapped("An APK cannot be compiled on the phone itself (it needs the Android SDK/NDK toolchain), "
+<<<<<<< HEAD
                            "so GitHub does the compiling.");
+=======
+                           "so GitHub does the compiling. Required .lua addons are copied into the project; .so addons are not bundled.");
+        if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(W * 0.7f, 0));
+    if (ImGui::BeginPopupModal("Mods missing", nullptr, ImGuiWindowFlags_NoResize)) {
+        ImGui::TextWrapped("The game was not started. This project requires mods that are missing or disabled:");
+        ImGui::TextWrapped("%s", modError.c_str());
+        ImGui::TextWrapped("Open Mods to enable them, or copy the files into %s", addonsDir.c_str());
+>>>>>>> 2cab7e6 (new update)
         if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
     // ---- deferred actions (never change the entity list while iterating it) ----
+<<<<<<< HEAD
+=======
+    if (!newScene.empty()) {
+        mkdirs(projectDir + "scenes/");
+        if (!fileExists(projectDir + sceneFile(newScene))) writeFile(projectDir + sceneFile(newScene), DEFAULT_SCENE);
+        goScene = newScene;
+    }
+    if (!goScene.empty() && goScene != sceneName) {
+        saveProject();
+        sceneName = goScene;
+        selected = 0;
+        loadScene();
+        status = "Scene: " + sceneName;
+    }
+>>>>>>> 2cab7e6 (new update)
     if (doAdd >= 0) selected = addEntity(doAdd);
     if (doDup && selected >= 1 && selected <= (int)ents.size()) {
         Entity c = ents[selected - 1];
@@ -1250,7 +2018,11 @@ void Game::drawEditorUI() {
     }
     if (doNewScript && selected >= 1) newScriptFor(selected);
     if (doEditScript && selected >= 1 && selected <= (int)ents.size()) openCode(ents[selected - 1].script);
+<<<<<<< HEAD
     if (doMenu) { saveProject(); codeOpen = false; refreshProjects(); screen = SCREEN_MENU; status.clear(); }
+=======
+    if (doMenu) { saveProject(); codeOpen = false; showAddons = false; refreshProjects(); screen = SCREEN_MENU; status.clear(); }
+>>>>>>> 2cab7e6 (new update)
     if (doPlay) { saveCode(); startPlay(); }
 }
 #endif
@@ -1456,7 +2228,12 @@ static double nowSec() {
 void android_main(android_app* app) {
     Platform p; p.app = app;
     p.game.assets = app->activity->assetManager;
+<<<<<<< HEAD
     if (app->activity->externalDataPath) p.game.fallbackDir = std::string(app->activity->externalDataPath) + "/game/";
+=======
+    if (app->activity->externalDataPath) p.game.fallbackDir = std::string(app->activity->externalDataPath) + "/";
+    if (app->activity->internalDataPath) p.game.internalDir = app->activity->internalDataPath;
+>>>>>>> 2cab7e6 (new update)
     app->userData = &p;
     app->onAppCmd = onCmd;
     app->onInputEvent = onInput;

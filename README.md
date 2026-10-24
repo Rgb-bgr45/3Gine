@@ -58,9 +58,33 @@ UI elements: `pos` and `scale` are percent of the screen (pos = centre). Built-i
 3. GitHub Actions builds both APKs. Download `3gine-game-apk` from the Actions run (or Releases with a `v*` tag).
 
 An APK cannot be compiled on the phone itself (needs the Android SDK/NDK), so GitHub compiles it.
+<<<<<<< HEAD
 
 ## Layout
 - `app/src/main/cpp/main.cpp` - engine, renderer, Lua bindings, editor, input
+=======
+
+## Hierarchy, scenes, folders
+- **Parent / child:** select an object -> `Parent: Set`. A child follows its parent's position, rotation and scale: `world = parentWorld x local` (matrix product). Loops are refused; deleting a parent deletes its children.
+- **Folders:** type a name in the `Folder` field, the scene list groups objects by folder. **Hide** hides an object in the editor only, **Lock** stops it from being picked or edited.
+- **Scenes:** top bar `Scenes` switches scenes or makes a new one (`scenes/<name>.lua`, the first scene is `scene.lua` = "main"). In a script: `engine.load_scene("Level2")`.
+- Extra Lua: `get_name`, `set_parent`, `get_parent`, `get_world_pos`, `get_distance(a,b)`, `move_towards(id,x,y,z,speed)` (true when reached), `check_raycast(x,y,z,dx,dy,dz)` -> id, distance, `load_scene(name)`.
+
+## Addons (mods)
+- Folder: `/sdcard/Documents/3gine/addons/` (fallback: the app's private folder). Top bar `Mods` lists them: Enable/Disable renames the file with/without `.disable`; disabled files are ignored at start.
+- **.lua** addons return a table: `{ start=function() end, update=function(dt) end }` (see `examples/addons/spin_all.lua`).
+- **.so** addons are native (arm64): export `gine_addon_init(const GineAPI*)` from `gine_addon.h` (see `examples/addons/native_example.cpp`). The library is copied into the app's private folder before loading.
+- **.dll / .gpp** are PC formats: they are listed as "not supported on Android".
+- **Required:** tick `Required` and the addon is written to the project's `project.json`. Play refuses to start when a required addon is missing or disabled and tells you which. The game APK shows the same message instead of crashing. On **Build APK** required `.lua` addons are copied into the project (`.so` addons are not bundled).
+- **crash.log** (in `Documents/3gine/`): Lua errors from addons/scripts and native crashes, with the name of the mod that was running.
+
+Not done yet (next steps): camera object, lights/shaders/materials, 3sics physics, virtual joystick, move gizmo with snap, .3ne backup, language screen, "Prepare for APK" zip, asset store.
+
+## Layout
+- `app/src/main/cpp/main.cpp` - engine, renderer, Lua bindings, editor, input, addons
+- `app/src/main/cpp/gine_addon.h` - native addon SDK
+- `examples/` - example addons
+>>>>>>> 2cab7e6 (new update)
 - `app/src/main/cpp/CMakeLists.txt` - native build
 - `game/` - projects (`game/Demo` is included), `game/startup.txt` = project built into the game APK
 - `publish.sh` - Termux helper
