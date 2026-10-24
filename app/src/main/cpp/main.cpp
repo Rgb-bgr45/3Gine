@@ -15,9 +15,7 @@
 #include <ctime>
 #include <vector>
 #include <string>
-#include "imgui.h"
-#include "imgui_impl_android.h"
-#include "imgui_impl_opengl3.h"
+#include <unistd.h>
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
@@ -788,8 +786,9 @@ struct Platform {
     EGLContext ctx = EGL_NO_CONTEXT;
     Game game;
     bool ready = false;
-    float lastX = 0, lastY = 0, lastPinch = 0, dragDist = 0;
-    bool touchOnUI = false, imgui = false;
+    float lastX = 0, lastY = 0, lastPinch = 0;
+    float downX = 0, downY = 0, moved = 0;
+    bool gameTouch = true;
 };
 
 static bool initGL(Platform& p) {
@@ -810,29 +809,27 @@ static bool initGL(Platform& p) {
     if (!eglMakeCurrent(p.dpy, p.surf, p.surf, p.ctx)) { LOG("makeCurrent failed"); return false; }
     eglQuerySurface(p.dpy, p.surf, EGL_WIDTH, &p.game.w);
     eglQuerySurface(p.dpy, p.surf, EGL_HEIGHT, &p.game.h);
-    p.game.init();
-    IMGUI_CHECKVERSION();
+#ifndef GAME_MODE
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr;
-    float sc = (float)p.game.h / 430.f; sc = sc < 1.8f ? 1.8f : (sc > 4.5f ? 4.5f : sc);
+    ImGui::GetIO().IniFilename = nullptr;
     ImGui::StyleColorsDark();
-    ImGui::GetStyle().ScaleAllSizes(sc);
-    ImGui::GetStyle().WindowRounding = 8.f;
-    ImGui::GetStyle().Alpha = 0.95f;
-    io.FontGlobalScale = sc;
+    ImGui::GetStyle().ScaleAllSizes(2.0f);
     ImGui_ImplAndroid_Init(p.app->window);
     ImGui_ImplOpenGL3_Init("#version 300 es");
-    p.imgui = true;
+#endif
+    p.game.init();
     return true;
 }
 static void termGL(Platform& p) {
     if (p.dpy == EGL_NO_DISPLAY) return;
-    if (p.imgui) {
-        ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplAndroid_Shutdown(); ImGui::DestroyContext();
-        p.imgui = false;
-    }
     p.game.shutdown();
+#ifndef GAME_MODE
+    if (ImGui::GetCurrentContext()) {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplAndroid_Shutdown();
+        ImGui::DestroyContext();
+    }
+#endif
     eglMakeCurrent(p.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (p.ctx != EGL_NO_CONTEXT) eglDestroyContext(p.dpy, p.ctx);
     if (p.surf != EGL_NO_SURFACE) eglDestroySurface(p.dpy, p.surf);
@@ -906,7 +903,6 @@ void android_main(android_app* app) {
     Platform p; p.app = app;
     p.game.assets = app->activity->assetManager;
     if (app->activity->externalDataPath) p.game.fallbackDir = std::string(app->activity->externalDataPath) + "/game/";
-    p.game.internalDir = app->activity->internalDataPath;
     app->userData = &p;
     app->onAppCmd = onCmd;
     app->onInputEvent = onInput;
@@ -924,17 +920,11 @@ void android_main(android_app* app) {
         double now = nowSec();
         float dt = (float)(now - last); last = now;
         if (dt > 0.1f) dt = 0.1f;
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplAndroid_NewFrame();
-        ImGui::NewFrame();
         p.game.update(dt);
-        p.game.ui();
-        ImGui::Render();
         p.game.render();
 #ifndef GAME_MODE
         p.game.drawUI();
 #endif
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         eglSwapBuffers(p.dpy, p.surf);
     }
     termGL(p);
