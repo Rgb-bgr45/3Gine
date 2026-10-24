@@ -28,19 +28,19 @@ set_target_properties(threegine PROPERTIES LINK_FLAGS "-u ANativeActivity_onCrea
 
 if(GAME_MODE)
     target_compile_definitions(threegine PRIVATE GAME_MODE)
-else()
-    # ---- Dear ImGui (editor UI) ----
-    FetchContent_Declare(imgui_src URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.5.tar.gz)
-    FetchContent_GetProperties(imgui_src)
-    if(NOT imgui_src_POPULATED)
-        FetchContent_Populate(imgui_src)
-    endif()
-    set(I ${imgui_src_SOURCE_DIR})
-    add_library(imgui_lib STATIC
-        ${I}/imgui.cpp ${I}/imgui_draw.cpp ${I}/imgui_tables.cpp ${I}/imgui_widgets.cpp
-        ${I}/backends/imgui_impl_android.cpp ${I}/backends/imgui_impl_opengl3.cpp)
-    target_include_directories(imgui_lib PUBLIC ${I} ${I}/backends)
-    target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_OPENGL_ES3)
-    target_link_libraries(imgui_lib PUBLIC android EGL GLESv3 log)
-    target_link_libraries(threegine imgui_lib)
 endif()
+
+# ---- Dear ImGui (editor UI, and button/label drawing in the game too) ----
+FetchContent_Declare(imgui_src URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.5.tar.gz)
+FetchContent_GetProperties(imgui_src)
+if(NOT imgui_src_POPULATED)
+    FetchContent_Populate(imgui_src)
+endif()
+set(I ${imgui_src_SOURCE_DIR})
+add_library(imgui_lib STATIC
+    ${I}/imgui.cpp ${I}/imgui_draw.cpp ${I}/imgui_tables.cpp ${I}/imgui_widgets.cpp
+    ${I}/backends/imgui_impl_android.cpp ${I}/backends/imgui_impl_opengl3.cpp)
+target_include_directories(imgui_lib PUBLIC ${I} ${I}/backends)
+target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_OPENGL_ES3)
+target_link_libraries(imgui_lib PUBLIC android EGL GLESv3 log)
+target_link_libraries(threegine imgui_lib)

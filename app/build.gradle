@@ -1,5 +1,9 @@
 plugins { id 'com.android.application' }
 
+// The game APK bundles the project named in game/startup.txt (written by the editor's Build APK button).
+def startupFile = file('../game/startup.txt')
+def startupName = startupFile.exists() ? startupFile.text.trim() : ''
+
 android {
     namespace 'com.threegine.engine'
     compileSdk 34
@@ -28,11 +32,11 @@ android {
         game {                         // the exported game: plays ../game, no editor UI
             dimension 'mode'
             applicationIdSuffix '.game'
-            manifestPlaceholders = [appLabel: 'My 3gine Game']   // change the name of your game here
+            manifestPlaceholders = [appLabel: (startupName ?: 'My 3gine Game')]   // app name = project name
             externalNativeBuild { cmake { arguments '-DGAME_MODE=ON' } }
         }
     }
 
-    // The project (scene.lua + scripts/) lives in the repo's game/ folder and is bundled into both APKs.
-    sourceSets { main { assets.srcDirs = ['../game'] } }
+    // Game APK: bundle game/<startup project>/ (scene.lua + scripts/). The editor APK needs no assets.
+    sourceSets { game { assets.srcDirs = ["../game/${startupName}"] } }
 }
