@@ -4,6 +4,7 @@ android {
     namespace 'com.threegine.engine'
     compileSdk 34
     ndkVersion '26.1.10909125'
+
     defaultConfig {
         applicationId 'com.threegine.engine'
         minSdk 26
@@ -12,7 +13,26 @@ android {
         versionName '1.0'
         ndk { abiFilters 'arm64-v8a' }
     }
+
     externalNativeBuild {
         cmake { path 'src/main/cpp/CMakeLists.txt'; version '3.22.1' }
     }
+
+    flavorDimensions 'mode'
+    productFlavors {
+        editor {                       // the on-device editor
+            dimension 'mode'
+            manifestPlaceholders = [appLabel: '3gine Editor']
+            externalNativeBuild { cmake { arguments '-DGAME_MODE=OFF' } }
+        }
+        game {                         // the exported game: plays ../game, no editor UI
+            dimension 'mode'
+            applicationIdSuffix '.game'
+            manifestPlaceholders = [appLabel: 'My 3gine Game']   // change the name of your game here
+            externalNativeBuild { cmake { arguments '-DGAME_MODE=ON' } }
+        }
+    }
+
+    // The project (scene.lua + scripts/) lives in the repo's game/ folder and is bundled into both APKs.
+    sourceSets { main { assets.srcDirs = ['../game'] } }
 }
