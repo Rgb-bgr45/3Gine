@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <cstdint>
+#include <cerrno>
 #include <functional>
 #include <filesystem>
 #include <map>
@@ -507,7 +508,7 @@ static void installCrashHandler() {
     for (int sg : sigs) signal(sg, crashHandler);
 }
 
-struct Addon { std::string id, file, dir, ext; bool enabled = true, supported = false; };
+struct Addon { std::string id, file, dir, ext; bool enabled = true, supported = false, builtin = false; };
 struct NativeCb { std::string id; void (*fn)(float); };
 
 struct Game {
@@ -547,7 +548,7 @@ struct Game {
     // hierarchy, scenes, addons
     float lastDt = 0;
     std::string sceneName = "main", snapScene, pendingScene;
-    std::string rootDir, addonsDir, internalDir, modError;
+    std::string rootDir, addonsDir, internalDir, modError, settingsDir;
     std::vector<std::string> reqs;      // addons the project requires (project.json)
     std::vector<Addon> addons;
     std::vector<NativeCb> nativeCbs;
@@ -1158,6 +1159,8 @@ void Game::init() {
         if (blockMsg.empty()) startPlay();
 #else
         settingsPath = fallbackDir + "setting/config.json";
+        settingsDir = fallbackDir + "setting/";
+        mkdirs(settingsDir);
         depotDir = fallbackDir;
         if (!depotDir.empty()) depot.init(depotDir);  // creates img/ sound/ material/
         setupBaseDir();
@@ -1459,7 +1462,7 @@ std::string Game::checkRequires() {  // returns the names of required addons tha
     std::string miss;
 #ifdef GAME_MODE
     for (const auto& id : reqs)
-        if (readAsset(("addons/" + id + ".lua").c_str()).empty()) miss += id + " ";
+        if (id != "3sics" && readAsset(("addons/" + id + ".lua").c_str()).empty()) miss += id + " ";  // 3sics is built in
 #else
     addons = scanAddons();
     for (const auto& id : reqs) {
@@ -1538,17 +1541,19 @@ void Game::loadNativeAddon(const Addon& a) {
 void Game::loadAddons() {
     nativeCbs.clear();
 #ifdef GAME_MODE
+    physicsOn = true;  // 3sics is part of the engine (C++); with no bodies it costs nothing
     for (const auto& id : reqs) {
+        if (id == "3sics") continue;
         std::string src = readAsset(("addons/" + id + ".lua").c_str());
-        if (!src.empty()) { loadLuaAddon(id, src); if (id == "3sics") physicsOn = true; }
+        if (!src.empty()) loadLuaAddon(id, src);
     }
 #else
     addons = scanAddons();
     for (const auto& a : addons) {
-        if (!a.enabled || !a.supported) continue;  // ".disable" files are ignored
+        if (a.builtin) { if (a.id == "3sics") physicsOn = a.enabled; continue; }   // built-in 3sics: toggled from the Mods menu
+        if (!a.enabled || !a.supported) continue;                                  // ".disable" files are ignored
         if (a.ext == ".lua") { std::string src; if (readFile(a.dir + a.file, src)) loadLuaAddon(a.id, src); }
         else loadNativeAddon(a);
-        if (a.id == "3sics") physicsOn = true;  // 3sics = the physics built into the engine, an addon you can switch off
     }
 #endif
 }
@@ -1741,14 +1746,7 @@ static const char* DEFAULT_SCENE =
     "engine.spawn{ name=\"Ground\", mesh=\"cube\", pos={0,-0.5,0}, scale={60,1,60}, color={0.42,0.66,0.38}, rot=0, spin=0, sway=0, shadow=0 }\n"
     "engine.spawn{ name=\"Cube\", mesh=\"cube\", pos={0,0.5,0}, scale={1,1,1}, color={0.95,0.75,0.25}, rot=0, spin=0, sway=0, shadow=1.4 }\n";
 
-static const char* BUILTIN_3SICS = R"LUA(-- 3sics: mid-level physics (gravity, AABB + sphere collisions, restitution, mass / impulse).
--- The physics itself is built into 3gine (C++). This file is the switch: rename it to 3sics.lua.disable to turn it off.
--- Scripts use: engine.physics_add_body(id, {shape="box"|"sphere", mass=1, restitution=0.3, static=false})
---   engine.physics_set_gravity(x,y,z)  engine.physics_add_impulse(id,x,y,z)  engine.physics_set_velocity(id,x,y,z)
---   engine.physics_get_velocity(id)    engine.physics_remove_body(id)         engine.physics_clear()
---   function on_collision(a, b) end    -- global callback when two bodies start touching
-return {}
-)LUA";
+
 
 // ---- zip archives (stored, no compression): used for .3ne backups and the "Prepare for APK" package ----
 static uint32_t crc32buf(const std::string& d) {
@@ -2097,9 +2095,11 @@ void Game::setupBaseDir() {
             remove(probe.c_str());
             rootDir = c; baseDir = c + "game/"; addonsDir = c + "addons/";
             mkdirs(addonsDir);
-            // 3sics (physics) is installed once as a normal addon: disable it by renaming it to 3sics.lua.disable
-            if (!fileExists(addonsDir + "3sics.lua") && !fileExists(addonsDir + "3sics.lua.disable"))
-                writeFile(addonsDir + "3sics.lua", BUILTIN_3SICS);
+            // older versions installed a 3sics.lua marker: physics is built into the engine now, remove that file
+            for (const char* old : {"3sics.lua", "3sics.lua.disable"}) {
+                std::string txt;
+                if (readFile(addonsDir + old, txt) && txt.compare(0, 8, "-- 3sics") == 0) remove((addonsDir + old).c_str());
+            }
             return;
         }
     }
@@ -2181,6 +2181,11 @@ std::vector<std::string> Game::listScenes() const {
 }
 std::vector<Addon> Game::scanAddons() const {
     std::vector<Addon> out;
+    {   // 3sics physics is built into the engine; the switch is a flag file in the app's settings folder
+        Addon b; b.id = "3sics"; b.file = "(built-in)"; b.ext = ""; b.builtin = true; b.supported = true;
+        b.enabled = settingsDir.empty() || !fileExists(settingsDir + "3sics.off");
+        out.push_back(b);
+    }
     if (addonsDir.empty()) return out;
     for (const auto& f : listDir(addonsDir, false)) {
         Addon a; a.file = f; a.dir = addonsDir; a.enabled = true;
@@ -2195,11 +2200,23 @@ std::vector<Addon> Game::scanAddons() const {
     }
     return out;
 }
-bool Game::toggleAddon(int idx) {  // enable/disable = add or remove the ".disable" suffix
+bool Game::toggleAddon(int idx) {  // enable/disable = built-in flag, or add / remove the ".disable" suffix
     if (idx < 0 || idx >= (int)addons.size()) return false;
     const Addon& a = addons[idx];
-    std::string nn = a.enabled ? a.file + ".disable" : a.file.substr(0, a.file.size() - 8);
-    return rename((a.dir + a.file).c_str(), (a.dir + nn).c_str()) == 0;
+    if (a.builtin) {
+        std::string flag = settingsDir + "3sics.off";
+        mkdirs(settingsDir);
+        bool ok = a.enabled ? writeFile(flag, "off\n") : (remove(flag.c_str()) == 0 || !fileExists(flag));
+        if (!ok) status = "Could not change " + flag;
+        return ok;
+    }
+    std::string from = a.dir + a.file;
+    std::string to = a.dir + (a.enabled ? a.file + ".disable" : a.file.substr(0, a.file.size() - 8));
+    if (rename(from.c_str(), to.c_str()) == 0) return true;
+    std::string why = strerror(errno), data;     // rename refused: copy the file under the new name instead
+    if (readFile(from, data) && writeFile(to, data) && remove(from.c_str()) == 0) return true;
+    status = "Could not rename " + a.file + ": " + why;
+    return false;
 }
 int Game::addEntity(int kind) {
     Entity e;
@@ -2340,7 +2357,7 @@ void Game::drawAddons(ImGuiWindowFlags F) {
     ImGui::SameLine();
     if (ImGui::Button("Refresh")) addons = scanAddons();
     ImGui::TextWrapped("Folder: %s", addonsDir.c_str());
-    ImGui::TextWrapped(".lua and .so addons are loaded. .dll / .gpp are PC formats and cannot run on Android. "
+    ImGui::TextWrapped("3sics (physics) is built into the engine: just switch it on or off here. .lua and .so addons from the folder are loaded too. .dll / .gpp are PC formats and cannot run on Android. "
                        "A disabled addon has .disable added to its file name and is ignored. "
                        "'Required' lists it in project.json: the game will not start without it.");
     ImGui::Separator();
@@ -2349,7 +2366,8 @@ void Game::drawAddons(ImGuiWindowFlags F) {
     for (int i = 0; i < (int)addons.size(); i++) {
         Addon& a = addons[i];
         ImGui::PushID(i);
-        ImGui::Text("%s%s", a.id.c_str(), a.ext.c_str());
+        if (a.builtin) ImGui::Text("%s  (built-in, C++)", a.id.c_str());
+        else ImGui::Text("%s%s", a.id.c_str(), a.ext.c_str());
         ImGui::SameLine();
         if (!a.supported) ImGui::TextUnformatted("(not supported on Android)");
         else if (ImGui::Button(a.enabled ? "Disable" : "Enable")) toggle = i;

@@ -43,16 +43,20 @@ Scripts attached to an object get `self` (its id): `start(self)`, `update(self, 
 | `load_scene(name)` | |
 | `play_sound("file.mp3", loop)`, `stop_sounds()` | sounds from the depot / project |
 | `touch()`, `screen()`, `time()`, `log(x)`, `load(file)` | globals `joystick_x`, `joystick_y` (-1..1) come from a Joystick element |
-| `physics_add_body(id,{shape="box"/"sphere",mass,restitution,static})`, `physics_set_gravity`, `physics_add_impulse`, `physics_set_velocity`, `physics_get_velocity`, `physics_remove_body`, `physics_clear` | **3sics** physics |
+| `physics_add_body(id,{shape="box"/"sphere",mass,restitution,static})` (needs 3sics enabled), `physics_set_gravity`, `physics_add_impulse`, `physics_set_velocity`, `physics_get_velocity`, `physics_remove_body`, `physics_clear` | **3sics** physics |
 
 UI elements: `pos`/`scale` are % of the screen (Joystick: `scale.x` = diameter in % of screen height). The editor uses a system font (Roboto) so Turkish, German, Russian text works.
 
-## 3sics physics
-Gravity, AABB + sphere collisions, restitution (the smaller of the two bodies' values), mass and impulses. Built into the engine (C++, `threesics.hpp`), enabled by the addon file `Documents/3gine/addons/3sics.lua` (installed automatically; rename it to `.disable` to switch physics off). Use unparented objects. Fine for dozens of bodies (pairs are checked one by one); bodies do not rotate.
+## 3sics physics (built-in addon)
+Gravity, AABB + sphere collisions, restitution (the smaller of the two bodies' values), mass and impulses. It is C++ inside the engine (`threesics.hpp`), not a Lua file: it appears in **More > Mods** as `3sics (built-in, C++)` with an **Enable / Disable** button (the switch is saved in the app's settings folder). Tick **Required** and Play refuses to start when it is off. The game APK always includes it. Use unparented objects; fine for dozens of bodies (pairs are checked one by one); bodies do not rotate.
 
 ## Addons (mods)
-Folder `Documents/3gine/addons/`. `.lua` addons return `{ start=function() end, update=function(dt) end }` (`examples/addons/spin_all.lua`). `.so` addons export `gine_addon_init(const GineAPI*)` (`gine_addon.h`, `examples/addons/native_example.cpp`). `.dll` / `.gpp` are listed as unsupported (PC formats).
-**Mods** window: Enable/Disable renames the file with / without `.disable` (disabled files are ignored at start). **Required** writes the addon to `project.json`; Play refuses to start with a clear message when a required addon is missing or disabled (the game APK shows the same message instead of crashing). Lua errors and native crashes go to `Documents/3gine/crash.log` with the mod's name.
+**More > Mods** lists the built-in 3sics and every addon found in `Documents/3gine/addons/`. Enable/Disable on a file addon adds/removes `.disable` on its name (if Android refuses the rename it copies the file under the new name and shows the reason in the status line). Disabled files are ignored at start.
+- `.lua` addons return `{ start=function() end, update=function(dt) end }` (`examples/addons/spin_all.lua`).
+- `.so` addons are native (arm64): export `gine_addon_init(const GineAPI*)` (`gine_addon.h`, `examples/addons/native_example.cpp`).
+- `.dll` / `.gpp` are PC formats: listed as unsupported.
+- **Required** writes the addon to `project.json`: Play refuses to start when it is missing or disabled and says which one (the game APK shows the same message instead of crashing).
+- Lua errors and native crashes go to `Documents/3gine/crash.log` with the name of the mod that was running.
 
 ## Custom shaders
 `<project>/shaders/name.frag`, `#version 300 es` (see `examples/shaders/rainbow.frag`); `engine.load_shader("name.frag")`. Provided: `vN`, `vW`, `uColor`, `uCam`, `uSun`, `uFog`, `uTime`, `uAlpha`, `uMat`, `uForward`, `uLN`, `uLP[4]`, `uLC[4]`, `uLR[4]`.
