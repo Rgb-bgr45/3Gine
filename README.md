@@ -1,87 +1,69 @@
 # 3gine
 
-Tiny stylized low-poly 3D engine + on-device editor for Android. C++17 (NativeActivity + EGL + OpenGL ES 3.0), Lua 5.4 scripting, Dear ImGui editor UI. Lua and ImGui are downloaded by CMake at build time.
+Ultra-light stylized low-poly 3D engine + on-device editor for Android.
+C++17 (NativeActivity, EGL, OpenGL ES 3.0), Lua 5.4 scripting, Dear ImGui editor. Lua, ImGui and stb_image are downloaded by CMake at build time. MIT license.
 
-**3D + engine = 3gine.**
-
-## Two APKs (built by GitHub Actions)
-- **3gine Editor** - project menu + editor.
+**3D + engine = 3gine.** Two APKs are built from this repo by GitHub Actions:
+- **3gine Editor** - project menu, scene editor, play-test sandbox.
 - **Game APK** - plays the project named in `game/startup.txt`, no editor UI.
 
-## Project menu
-On start the editor shows the project list (like Godot): **Create** (asks for a name), **Open**, **Refresh**.
-Projects live in `/sdcard/Documents/3gine/game/<name>/` (`scene.lua` + `scripts/*.lua`).
-**First run:** Android settings -> Apps -> 3gine Editor -> Permissions -> "All files access".
+## Build (GitHub)
+Extract this zip into the root of your repo, then `git add -A && git commit -m "3gine" && git push`.
+Open the **Actions** tab: artifacts `3gine-editor-apk` and `3gine-game-apk`. A tag like `v0.1` also attaches both APKs to a Release.
+Local build: Android Studio / `gradle assembleEditorDebug assembleGameDebug` (NDK 26.1.10909125, CMake 3.22.1).
+
+## First run
+1. **Welcome** screen (once): choose a language (English default) -> OK. Saved in `<app files>/setting/config.json`.
+2. Grant **All files access** (Android settings -> Apps -> 3gine Editor -> Permissions) so projects can live in `/sdcard/Documents/3gine/`.
+3. Project menu: **Create** (asks for a name) / **Open** / Refresh / Import .3ne / Depot. Projects: `Documents/3gine/game/<name>/`.
 
 ## Editor
-- Top bar: **Menu**, **Play** (sandbox test, **Stop** restores the scene), **Save**, **Build APK**, **+ Add**.
-- **+ Add** shapes: Cube, Cone, Disc, Cylinder, Sphere, Pyramid, Prism, Wedge, Torus, Stairs. UI: **Button**, **Label**.
-- Left: scene list. Right: inspector (name, position, size, rotation, colour, spin, sway, shadow, script).
-- Tap an object in the 3D view to select it. Drag = orbit, pinch = zoom.
-- UI elements (Button/Label) use Pos/Size in percent of the screen and a Text field.
+Top bar: Menu | Play (sandbox, Stop restores the scene) | **Prepare for APK** | Save | + Add | Scenes | Snap | More (Mods, Depot, Backup .3ne).
+- **+ Add**: Cube, Cone, Disc, Cylinder, Sphere, Pyramid, Prism, Wedge, Torus, Stairs, **Camera**, **Light**, UI: Button, Label, Joystick, Image.
+- Tap an object to select it. A **move gizmo** (X red, Y green, Z blue) appears: drag an arrow, with **Snap** Off / 0.5 / 1.0. Drag = orbit, pinch = zoom.
+- Inspector: name, folder, hide, lock, parent, position/size/rotation, colour, material, light intensity/range, camera look-at + FOV, script (New / Pick / Edit / Clear).
+- Scene list is grouped by **folder**; children are indented under their **parent** (`world = parentWorld x local`). **Hide** = editor only, **Lock** = cannot be picked/edited.
+- **Scenes**: switch / create (`scenes/<name>.lua`; the first scene is `scene.lua` = "main"). In Lua: `engine.load_scene("Level2")`.
+- Script editor (top half of the screen, the on-screen keyboard works, plus a symbol bar). Scripts are `scripts/<name>.lua`.
+- Rendering starts **Unlit** (cheap built-in look). The first Light object or custom shader switches to **Forward** automatically (shown in the top bar).
 
-## Scripts (Lua) on objects and buttons
-Select an object or button -> **New** creates `scripts/<name>.lua` and opens the script editor (**Pick** reuses one, **Edit** reopens it).
-The on-screen keyboard types into the editor; the symbol bar inserts ( ) { } [ ] " ' = etc. You can also edit the files in Termux.
-Press **Play** to try it. Change the code, Save & Close, Play again.
+## Lua API
+Scripts attached to an object get `self` (its id): `start(self)`, `update(self, dt)`, and `on_click(self)` for buttons. Optional global `scripts/main.lua` (`start()`, `update(dt)`), and a global `on_collision(a, b)`.
 
-```lua
--- script on a Button: every tap moves all objects named "Cube" 10 units along x
-function on_click(self)
-  for _, id in ipairs(engine.find_all("Cube")) do
-    engine.move(id, 10, 0, 0)
-  end
-end
-
--- script on a 3D object
-function start(self) end
-function update(self, dt) engine.move(self, dt, 0, 0) end
-```
-`self` is the id of the object the script is attached to. Optional global script: `scripts/main.lua` with `start()` / `update(dt)`.
-
-| Function | What it does |
+| Function | |
 |---|---|
-| `engine.spawn{name=, mesh=, pos=, scale=, color=, rot=, spin=, sway=, shadow=, text=, script=}` | create an object, returns id. `mesh`: cube cone disc cylinder sphere pyramid prism wedge torus stairs button label |
-| `engine.find(name)` / `engine.find_all(name)` | id / table of ids |
-| `engine.destroy(id)` | remove |
-| `engine.set_pos(id,x,y,z)` / `engine.get_pos(id)` / `engine.move(id,dx,dy,dz)` | position |
-| `engine.set_scale` / `engine.get_scale`, `engine.set_color(id,r,g,b)`, `engine.set_rot` / `engine.get_rot` | change an object |
-| `engine.set_text(id,s)` / `engine.get_text(id)` | button / label text |
-| `engine.camera{yaw=,pitch=,dist=,target={x,y,z}}`, `engine.set_orbit(false)` | camera |
-| `engine.touch()` -> down,x,y,dx,dy; `engine.screen()`; `engine.time()`; `engine.log(x)`; `engine.load(file)` | misc |
+| `spawn{name,mesh,pos,scale,color,rot,spin,sway,shadow,text,script,material,parent,folder,...}` | create, returns id. mesh: cube cone disc cylinder sphere pyramid prism wedge torus stairs camera light button label joystick image |
+| `find(name)`, `find_all(name)`, `destroy(id)`, `get_name(id)` | |
+| `get_pos / set_pos / move`, `get_world_pos`, `get_scale / set_scale`, `get_rot / set_rot`, `set_color` | |
+| `set_parent(id,parentId)`, `get_parent(id)` | hierarchy |
+| `get_distance(a,b)`, `move_towards(id,x,y,z,speed)`, `check_raycast(x,y,z,dx,dy,dz)` -> id, distance, `get_bounds(id)` | |
+| `set_camera_look_at(cam,x,y,z)` or `(cam,targetId)`, `set_camera_fov(cam,fov)`, `camera{...}`, `set_orbit(false)` | the first Camera object is the view while playing |
+| `set_light_properties(id,r,g,b,intensity,range)`, `set_material(id,"metal")`, `load_shader("file.frag")` | materials: matte plastic glossy metal glow rubber, or a depot `name.mat` |
+| `set_text / get_text`, `set_image(id,"file.png")` | UI |
+| `load_scene(name)` | |
+| `play_sound("file.mp3", loop)`, `stop_sounds()` | sounds from the depot / project |
+| `touch()`, `screen()`, `time()`, `log(x)`, `load(file)` | globals `joystick_x`, `joystick_y` (-1..1) come from a Joystick element |
+| `physics_add_body(id,{shape="box"/"sphere",mass,restitution,static})`, `physics_set_gravity`, `physics_add_impulse`, `physics_set_velocity`, `physics_get_velocity`, `physics_remove_body`, `physics_clear` | **3sics** physics |
 
-UI elements: `pos` and `scale` are percent of the screen (pos = centre). Built-in font is ASCII only (no Turkish letters yet).
+UI elements: `pos`/`scale` are % of the screen (Joystick: `scale.x` = diameter in % of screen height). The editor uses a system font (Roboto) so Turkish, German, Russian text works.
 
-## Editor -> game APK
-1. In the editor press **Build APK** (saves and writes `startup.txt` with the project name).
-2. In Termux, in your repo: `sh publish.sh` (copies `/sdcard/Documents/3gine/game` into the repo's `game/`, commits, pushes; run `termux-setup-storage` once).
-3. GitHub Actions builds both APKs. Download `3gine-game-apk` from the Actions run (or Releases with a `v*` tag).
-
-An APK cannot be compiled on the phone itself (needs the Android SDK/NDK), so GitHub compiles it.
-
-## Hierarchy, scenes, folders
-- **Parent / child:** select an object -> `Parent: Set`. A child follows its parent's position, rotation and scale: `world = parentWorld x local` (matrix product). Loops are refused; deleting a parent deletes its children.
-- **Folders:** type a name in the `Folder` field, the scene list groups objects by folder. **Hide** hides an object in the editor only, **Lock** stops it from being picked or edited.
-- **Scenes:** top bar `Scenes` switches scenes or makes a new one (`scenes/<name>.lua`, the first scene is `scene.lua` = "main"). In a script: `engine.load_scene("Level2")`.
-- Extra Lua: `get_name`, `set_parent`, `get_parent`, `get_world_pos`, `get_distance(a,b)`, `move_towards(id,x,y,z,speed)` (true when reached), `check_raycast(x,y,z,dx,dy,dz)` -> id, distance, `load_scene(name)`.
+## 3sics physics
+Gravity, AABB + sphere collisions, restitution (the smaller of the two bodies' values), mass and impulses. Built into the engine (C++, `threesics.hpp`), enabled by the addon file `Documents/3gine/addons/3sics.lua` (installed automatically; rename it to `.disable` to switch physics off). Use unparented objects. Fine for dozens of bodies (pairs are checked one by one); bodies do not rotate.
 
 ## Addons (mods)
-- Folder: `/sdcard/Documents/3gine/addons/` (fallback: the app's private folder). Top bar `Mods` lists them: Enable/Disable renames the file with/without `.disable`; disabled files are ignored at start.
-- **.lua** addons return a table: `{ start=function() end, update=function(dt) end }` (see `examples/addons/spin_all.lua`).
-- **.so** addons are native (arm64): export `gine_addon_init(const GineAPI*)` from `gine_addon.h` (see `examples/addons/native_example.cpp`). The library is copied into the app's private folder before loading.
-- **.dll / .gpp** are PC formats: they are listed as "not supported on Android".
-- **Required:** tick `Required` and the addon is written to the project's `project.json`. Play refuses to start when a required addon is missing or disabled and tells you which. The game APK shows the same message instead of crashing. On **Build APK** required `.lua` addons are copied into the project (`.so` addons are not bundled).
-- **crash.log** (in `Documents/3gine/`): Lua errors from addons/scripts and native crashes, with the name of the mod that was running.
+Folder `Documents/3gine/addons/`. `.lua` addons return `{ start=function() end, update=function(dt) end }` (`examples/addons/spin_all.lua`). `.so` addons export `gine_addon_init(const GineAPI*)` (`gine_addon.h`, `examples/addons/native_example.cpp`). `.dll` / `.gpp` are listed as unsupported (PC formats).
+**Mods** window: Enable/Disable renames the file with / without `.disable` (disabled files are ignored at start). **Required** writes the addon to `project.json`; Play refuses to start with a clear message when a required addon is missing or disabled (the game APK shows the same message instead of crashing). Lua errors and native crashes go to `Documents/3gine/crash.log` with the mod's name.
 
-Not done yet (next steps): camera object, lights/shaders/materials, 3sics physics, virtual joystick, move gizmo with snap, .3ne backup, language screen, "Prepare for APK" zip, asset store.
+## Custom shaders
+`<project>/shaders/name.frag`, `#version 300 es` (see `examples/shaders/rainbow.frag`); `engine.load_shader("name.frag")`. Provided: `vN`, `vW`, `uColor`, `uCam`, `uSun`, `uFog`, `uTime`, `uAlpha`, `uMat`, `uForward`, `uLN`, `uLP[4]`, `uLC[4]`, `uLR[4]`.
+
+## Depot (assets)
+`<app files>/img`, `/sound`, `/material` (`Android/data/com.threegine.engine/files/`). Add files with a file manager, or in the editor: **More > Depot > + Add file** (built-in file browser copies the file). png/jpg, mp3/ogg/wav, and `.mat` materials (`specular= shininess= emissive= metal=`). On Android 11+ file managers may be blocked from `Android/data`; the in-app picker always works.
+
+## Backup, APK
+- **Backup .3ne** (More menu): everything - scenes, scripts, shaders, sounds, images - in one archive (a standard zip, stored uncompressed) at `Download/3Gine-project/<name>/<name>.3ne`. Import it from the project menu.
+- **Prepare for APK** (next to Play, text depends on the language): writes `Download/3Gine-project/<name>/<name>.zip` with the engine source + your project, ready to build. An APK cannot be compiled on the phone, so upload it to GitHub (extract first) and Actions builds `3gine-game-apk`. Or run `sh publish.sh` in Termux to push `Documents/3gine/game` into this repo's `game/`.
+- Change the package name (e.g. `dev.3gine.ge`) in `app/build.gradle` (`applicationId`, `namespace`); asset/config paths follow the package.
 
 ## Layout
-- `app/src/main/cpp/main.cpp` - engine, renderer, Lua bindings, editor, input, addons
-- `app/src/main/cpp/gine_addon.h` - native addon SDK
-- `examples/` - example addons
-- `app/src/main/cpp/CMakeLists.txt` - native build
-- `game/` - projects (`game/Demo` is included), `game/startup.txt` = project built into the game APK
-- `publish.sh` - Termux helper
-
-## License
-MIT
+`app/src/main/cpp/main.cpp` engine + editor, `threesics.hpp` physics, `depot.hpp` asset depot, `gine_addon.h` native addon SDK, `CMakeLists.txt`; `game/` projects (`Demo` included: scenes, UI, joystick, camera, light, physics) and `startup.txt`; `examples/`; `publish.sh`; `.github/workflows/build.yml`.

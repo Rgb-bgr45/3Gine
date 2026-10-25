@@ -38,5 +38,43 @@ android {
     }
 
     // Game APK: bundle game/<startup project>/ (scene.lua + scripts/). The editor APK needs no assets.
-    sourceSets { game { assets.srcDirs = ["../game/${startupName}"] } }
+    sourceSets {
+        game { assets.srcDirs = ["../game/${startupName}"] }
+        editor { assets.srcDirs = [new File(layout.buildDirectory.get().asFile, 'engine_src_assets')] }  // engine source for "Prepare for APK"
+    }
 }
+
+// Copies the engine source into the editor APK's assets (engine_src/ + manifest.txt: "assetPath|pathInZip").
+// Android assets skip names that start with "." so .github / .gitignore are stored as dot_* and restored by the editor.
+tasks.register('copyEngineSrc') {
+    doLast {
+        def outDir = new File(layout.buildDirectory.get().asFile, 'engine_src_assets/engine_src')
+        outDir.deleteDir()
+        outDir.mkdirs()
+        def lines = []
+        def add = { File f, String assetRel, String zipRel ->
+            def t = new File(outDir, assetRel)
+            t.parentFile.mkdirs()
+            t.bytes = f.bytes
+            lines << "${assetRel}|${zipRel}"
+        }
+        ['app/build.gradle', 'build.gradle', 'settings.gradle', 'gradle.properties', 'publish.sh', 'LICENSE', 'README.md',
+         'app/src/main/AndroidManifest.xml', 'app/src/editor/AndroidManifest.xml'].each { rel ->
+            def f = new File(rootDir, rel)
+            if (f.exists()) add(f, rel, rel)
+        }
+        new File(rootDir, 'app/src/main/cpp').eachFile { f ->
+            if (f.isFile()) add(f, "app/src/main/cpp/${f.name}", "app/src/main/cpp/${f.name}")
+        }
+        def ex = new File(rootDir, 'examples')
+        if (ex.exists()) ex.eachFileRecurse { f ->
+            if (f.isFile()) { def rel = rootDir.toPath().relativize(f.toPath()).toString(); add(f, rel, rel) }
+        }
+        def wf = new File(rootDir, '.github/workflows/build.yml')
+        if (wf.exists()) add(wf, 'dot_github/workflows/build.yml', '.github/workflows/build.yml')
+        def gi = new File(rootDir, '.gitignore')
+        if (gi.exists()) add(gi, 'dot_gitignore', '.gitignore')
+        new File(outDir, 'manifest.txt').text = lines.join('\n')
+    }
+}
+preBuild.dependsOn tasks.named('copyEngineSrc')

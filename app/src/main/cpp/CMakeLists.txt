@@ -44,3 +44,11 @@ target_include_directories(imgui_lib PUBLIC ${I} ${I}/backends)
 target_compile_definitions(imgui_lib PUBLIC IMGUI_IMPL_OPENGL_ES3)
 target_link_libraries(imgui_lib PUBLIC android EGL GLESv3 log)
 target_link_libraries(threegine imgui_lib)
+
+# ---- stb_image (PNG / JPG decoding for the Image UI element) ----
+FetchContent_Declare(stb_src URL https://github.com/nothings/stb/archive/refs/heads/master.tar.gz)
+FetchContent_GetProperties(stb_src)
+if(NOT stb_src_POPULATED)
+    FetchContent_Populate(stb_src)
+endif()
+target_include_directories(threegine PRIVATE ${stb_src_SOURCE_DIR})

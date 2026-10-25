@@ -17,6 +17,10 @@
 #include <string>
 #include <unistd.h>
 #include <dirent.h>
+#include <cstdint>
+#include <functional>
+#include <filesystem>
+#include <map>
 #include <dlfcn.h>
 #include <csignal>
 #include <fcntl.h>
@@ -31,6 +35,10 @@ extern "C" {
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
 #include "gine_addon.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#include "stb_image.h"
 
 #define LOG(...) __android_log_print(ANDROID_LOG_INFO, "3gine", __VA_ARGS__)
 
@@ -42,6 +50,9 @@ static V3 operator*(V3 a, float s) { return {a.x * s, a.y * s, a.z * s}; }
 static float dot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 static V3 cross(V3 a, V3 b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 static V3 norm(V3 a) { float l = std::sqrt(dot(a, a)); return l > 1e-8f ? a * (1.f / l) : V3{0, 1, 0}; }
+#define GINE_V3_DEFINED
+#include "threesics.hpp"   // 3sics physics (uses the V3 above)
+#include "depot.hpp"       // asset depot (std::filesystem)
 
 struct M4 { float m[16]; };  // column-major
 static M4 mul(const M4& a, const M4& b) {
@@ -243,31 +254,55 @@ void main(){
 })";
 
 static const char* FS = R"(#version 300 es
-precision mediump float;
+precision highp float;
 in vec3 vN;
 in vec3 vW;
 uniform vec3 uColor;
 uniform vec3 uCam;
 uniform vec3 uSun;     // direction towards the sun
 uniform vec3 uFog;
-uniform float uAlpha;
+uniform float uAlpha;  // < 1.0: blob shadow
+uniform int uForward;  // 0 = Unlit (cheap built-in look), 1 = Forward (dynamic lights + materials)
+uniform vec4 uMat;     // specular, shininess, emissive, metal
+uniform int uLN;
+uniform vec3 uLP[4];
+uniform vec3 uLC[4];
+uniform float uLR[4];
 out vec4 o;
 void main(){
     if (uAlpha < 1.0) { o = vec4(uColor, uAlpha); return; }
     vec3 n = normalize(vN);
-    float d = max(dot(n, normalize(uSun)), 0.0);
-    // 3-step toon bands
+    vec3 sunL = normalize(uSun);
+    float d = max(dot(n, sunL), 0.0);
     float band = d < 0.2 ? 0.0 : (d < 0.55 ? 0.5 : 1.0);
-    // warm sky / cool ground ambient
     vec3 amb = mix(vec3(0.30,0.28,0.38), vec3(0.55,0.65,0.80), n.y*0.5+0.5);
-    vec3 lit = uColor * (amb*0.75 + vec3(1.0,0.93,0.78)*band*0.65);
-    // soft rim light
     vec3 vd = normalize(uCam - vW);
+    vec3 lit;
+    if (uForward == 0) {
+        lit = uColor * (amb*0.75 + vec3(1.0,0.93,0.78)*band*0.65);
+    } else {
+        float metal = uMat.w;
+        vec3 diffCol = uColor * (1.0 - 0.6*metal);
+        vec3 specCol = mix(vec3(1.0), uColor, metal);
+        vec3 hs = normalize(sunL + vd);
+        float sp = pow(max(dot(n, hs), 0.0), uMat.y) * uMat.x;
+        lit = diffCol * (amb*0.75 + vec3(1.0,0.93,0.78)*band*0.65) + specCol*sp*0.6*band + uColor*uMat.z;
+        for (int i = 0; i < 4; i++) {
+            if (i >= uLN) break;
+            vec3 lv = uLP[i] - vW;
+            float dist = length(lv);
+            float att = clamp(1.0 - dist/uLR[i], 0.0, 1.0);
+            att *= att;
+            vec3 l = lv / max(dist, 0.0001);
+            float nd = max(dot(n, l), 0.0);
+            vec3 hh = normalize(l + vd);
+            float s2 = pow(max(dot(n, hh), 0.0), uMat.y) * uMat.x;
+            lit += uLC[i] * att * (diffCol*nd + specCol*s2);
+        }
+    }
     float rim = pow(1.0 - max(dot(n, vd), 0.0), 3.0);
     lit += vec3(0.5,0.6,0.8) * rim * 0.18;
-    // fog blends to the sky colour
-    float dist = length(uCam - vW);
-    float f = smoothstep(25.0, 85.0, dist);
+    float f = smoothstep(25.0, 85.0, length(uCam - vW));
     o = vec4(mix(lit, uFog, f), 1.0);
 })";
 
@@ -288,12 +323,13 @@ void main(){
     o = vec4(mix(horizon, zenith, smoothstep(0.35, 1.0, vY)), 1.0);
 })";
 
+static std::string g_shaderLog;
 static GLuint compile(GLenum type, const char* src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
     glCompileShader(s);
     GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) { char buf[512]; glGetShaderInfoLog(s, 512, nullptr, buf); LOG("shader: %s", buf); }
+    if (!ok) { char buf[512]; glGetShaderInfoLog(s, 512, nullptr, buf); LOG("shader: %s", buf); g_shaderLog = buf; }
     return s;
 }
 static GLuint makeProgram(const char* vsSrc = VS, const char* fsSrc = FS) {
@@ -307,18 +343,61 @@ static GLuint makeProgram(const char* vsSrc = VS, const char* fsSrc = FS) {
 
 // ---------------------------------------------------------------- game
 enum Mode { MODE_EDIT, MODE_PLAY };
-enum Screen { SCREEN_MENU, SCREEN_PROJECT };
-enum { MESH_COUNT = 10, KIND_BUTTON = 10, KIND_LABEL = 11, KIND_COUNT = 12 };
+enum Screen { SCREEN_WELCOME, SCREEN_MENU, SCREEN_PROJECT };
+// meshId: 0..9 = 3D meshes, 10 camera, 11 light (3D helpers), 12.. = UI elements (pos/size in % of the screen)
+enum { MESH_COUNT = 10, KIND_CAMERA = 10, KIND_LIGHT = 11, KIND_BUTTON = 12, KIND_LABEL = 13,
+       KIND_JOYSTICK = 14, KIND_IMAGE = 15, KIND_COUNT = 16 };
 
-static const char* MESH_NAMES[KIND_COUNT] = {"cube", "cone", "disc", "cylinder", "sphere", "pyramid",
-                                             "prism", "wedge", "torus", "stairs", "button", "label"};
-static const char* ADD_NAMES[KIND_COUNT] = {"Cube", "Cone", "Disc", "Cylinder", "Sphere", "Pyramid",
-                                            "Prism", "Wedge", "Torus", "Stairs", "Button", "Label"};
+static const char* MESH_NAMES[KIND_COUNT] = {"cube", "cone", "disc", "cylinder", "sphere", "pyramid", "prism", "wedge",
+                                             "torus", "stairs", "camera", "light", "button", "label", "joystick", "image"};
+static const char* ADD_NAMES[KIND_COUNT] = {"Cube", "Cone", "Disc", "Cylinder", "Sphere", "Pyramid", "Prism", "Wedge",
+                                            "Torus", "Stairs", "Camera", "Light", "Button", "Label", "Joystick", "Image"};
 // vertical extent of each mesh in local space (used for placing and picking)
 static const float MESH_Y0[MESH_COUNT] = {-0.5f, 0, -0.05f, 0, -0.5f, 0, 0, -0.5f, -0.15f, 0};
 static const float MESH_Y1[MESH_COUNT] = {0.5f, 1, 0.05f, 1, 0.5f, 1, 1, 0.5f, 0.15f, 1};
+static inline bool isUIKind(int k) { return k >= KIND_BUTTON; }
+static inline bool isHelperKind(int k) { return k == KIND_CAMERA || k == KIND_LIGHT; }
 
-// 3D objects use meshId 0..9. UI elements (meshId 10 button, 11 label) use pos/scale as percent of the screen.
+static const char* MATERIALS[6] = {"matte", "plastic", "glossy", "metal", "glow", "rubber"};
+// out = specular strength, shininess, emissive, metalness (only used in Forward mode)
+static void materialParams(const std::string& m, float out[4]) {
+    float v[4] = {0.f, 8.f, 0.f, 0.f};
+    if (m == "plastic") { v[0] = 0.5f; v[1] = 32.f; }
+    else if (m == "glossy") { v[0] = 0.9f; v[1] = 96.f; }
+    else if (m == "metal") { v[0] = 1.f; v[1] = 48.f; v[3] = 1.f; }
+    else if (m == "glow") { v[2] = 0.9f; }
+    else if (m == "rubber") { v[0] = 0.05f; v[1] = 4.f; }
+    for (int i = 0; i < 4; i++) out[i] = v[i];
+}
+static void parseMaterialText(const std::string& txt, float out[4]) {  // .mat: specular= shininess= emissive= metal=
+    out[0] = 0; out[1] = 8; out[2] = 0; out[3] = 0;
+    size_t pos = 0;
+    while (pos < txt.size()) {
+        size_t nl = txt.find('\n', pos);
+        if (nl == std::string::npos) nl = txt.size();
+        std::string line = txt.substr(pos, nl - pos);
+        pos = nl + 1;
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string k = line.substr(0, eq);
+        float v = (float)atof(line.c_str() + eq + 1);
+        if (k == "specular") out[0] = v; else if (k == "shininess") out[1] = v;
+        else if (k == "emissive") out[2] = v; else if (k == "metal") out[3] = v;
+    }
+}
+static void kindDefaults(int k, V3& pos, V3& scale, V3& color, std::string& text) {
+    pos = {0, 0, 0}; scale = {1, 1, 1}; color = {0.8f, 0.8f, 0.8f}; text.clear();
+    switch (k) {
+        case KIND_CAMERA: pos = {0, 3, 8}; color = {0.6f, 0.7f, 0.9f}; break;
+        case KIND_LIGHT: pos = {0, 3, 0}; color = {1.f, 0.95f, 0.8f}; break;
+        case KIND_BUTTON: pos = {50, 50, 0}; scale = {20, 10, 1}; color = {0.25f, 0.45f, 0.85f}; text = "Button"; break;
+        case KIND_LABEL: pos = {50, 50, 0}; scale = {20, 6, 1}; color = {1, 1, 1}; text = "Label"; break;
+        case KIND_JOYSTICK: pos = {15, 72, 0}; scale = {28, 28, 1}; color = {1, 1, 1}; break;  // scale.x = diameter (% of screen height)
+        case KIND_IMAGE: pos = {50, 50, 0}; scale = {20, 20, 1}; color = {1, 1, 1}; break;
+        default: if (k == 1 || k == 5) color = {0.3f, 0.6f, 0.35f}; break;
+    }
+}
+
 struct Entity {
     int id; bool alive; int meshId;
     std::string name, text, script;
@@ -329,7 +408,28 @@ struct Entity {
     std::string folder;        // editor grouping
     bool hidden = false;       // editor only: not drawn while editing
     bool locked = false;       // editor only: cannot be picked or edited
+    float intensity = 1.f, range = 10.f, fov = 0.9f;   // light / camera
+    std::string material = "matte", img;               // surface preset / UI image file
+    V3 look = {0, 1, 0};       // camera: look-at point
+    int lookId = 0;            // camera: look at this object instead (0 = use point)
 };
+
+// ---- languages (first-run Welcome screen, saved in config.json) ----
+enum Str { S_PLAY, S_STOP, S_SAVE, S_PREPARE, S_ADD, S_SCENES, S_MODS, S_MENU, S_CREATE, S_OPEN, S_REFRESH, S_CLOSE, S_OK, S_CANCEL, S_DELETE, S_DUPLICATE, S_NEW, S_PICK, S_EDIT, S_CLEAR, S_SCENE_LIST, S_INSPECTOR, S_PROJECTS, S_NAME, S_FOLDER, S_PARENT, S_SET, S_POS, S_SIZE, S_ROT, S_COLOR, S_HIDE, S_LOCK, S_SCRIPT, S_DEPOT, S_IMPORT, S_BACKUP, S_SNAP, S_TAP_HINT, S_NO_PROJECTS, S_SAVE_CLOSE, S_NEW_SCENE, S_MORE, S_OFF, S_MATERIAL, S_INTENSITY, S_RANGE, S_LOOK_AT, S_FOV, S_IMAGE, S_ADD_FILE, S_LANGUAGE, S_COUNT };
+static const char* LANG_CODES[6] = {"en", "tr", "de", "es", "fr", "ru"};
+static const char* LANG_NAMES[6] = {"English", "Türkçe", "Deutsch", "Español", "Français", "Русский"};
+static const char* STR[6][S_COUNT] = {
+    {"Play", "Stop", "Save", "Prepare for APK", "+ Add", "Scenes", "Mods", "Menu", "Create", "Open", "Refresh", "Close", "OK", "Cancel", "Delete", "Duplicate", "New", "Pick", "Edit", "Clear", "Scene", "Inspector", "Projects", "Name", "Folder", "Parent", "Set", "Pos", "Size", "Rot", "Color", "Hide", "Lock", "Script", "Depot", "Import .3ne", "Backup .3ne", "Snap", "Tap an object in the scene or in the list.", "No projects yet. Press Create to make one.", "Save & Close", "+ New scene", "More", "Off", "Material", "Intensity", "Range", "Look at", "FOV", "Image", "+ Add file", "Language"},
+    {"Bitince Çalıştır", "Durdur", "Kaydet", "Apk olacak şekilde düzenle", "+ Ekle", "Sahneler", "Modlar", "Menü", "Oluştur", "Aç", "Yenile", "Kapat", "Tamam", "İptal", "Sil", "Çoğalt", "Yeni", "Seç", "Düzenle", "Temizle", "Sahne", "Özellikler", "Projeler", "İsim", "Klasör", "Ebeveyn", "Ayarla", "Konum", "Boyut", "Dönüş", "Renk", "Gizle", "Kilitle", "Script", "Depo", ".3ne içe aktar", ".3ne yedekle", "Mıknatıs", "Sahnede veya listeden bir nesneye dokun.", "Henüz proje yok. Oluştur'a bas.", "Kaydet ve Kapat", "+ Yeni sahne", "Daha fazla", "Kapalı", "Materyal", "Yoğunluk", "Menzil", "Bakış noktası", "FOV", "Resim", "+ Dosya ekle", "Dil"},
+    {"Abspielen", "Stopp", "Speichern", "Für APK vorbereiten", "+ Hinzufügen", "Szenen", "Mods", "Menü", "Erstellen", "Öffnen", "Aktualisieren", "Schließen", "OK", "Abbrechen", "Löschen", "Duplizieren", "Neu", "Wählen", "Bearbeiten", "Leeren", "Szene", "Inspektor", "Projekte", "Name", "Ordner", "Eltern", "Setzen", "Pos", "Größe", "Rot", "Farbe", "Verbergen", "Sperren", "Skript", "Depot", ".3ne importieren", ".3ne sichern", "Raster", "Tippe auf ein Objekt in der Szene oder Liste.", "Noch keine Projekte. Tippe auf Erstellen.", "Speichern & Schließen", "+ Neue Szene", "Mehr", "Aus", "Material", "Intensität", "Reichweite", "Blick auf", "FOV", "Bild", "+ Datei hinzufügen", "Sprache"},
+    {"Jugar", "Detener", "Guardar", "Preparar para APK", "+ Añadir", "Escenas", "Mods", "Menú", "Crear", "Abrir", "Actualizar", "Cerrar", "OK", "Cancelar", "Eliminar", "Duplicar", "Nuevo", "Elegir", "Editar", "Limpiar", "Escena", "Inspector", "Proyectos", "Nombre", "Carpeta", "Padre", "Fijar", "Pos", "Tamaño", "Rot", "Color", "Ocultar", "Bloquear", "Script", "Depósito", "Importar .3ne", "Respaldar .3ne", "Ajuste", "Toca un objeto en la escena o en la lista.", "Aún no hay proyectos. Pulsa Crear.", "Guardar y cerrar", "+ Nueva escena", "Más", "No", "Material", "Intensidad", "Alcance", "Mirar a", "FOV", "Imagen", "+ Añadir archivo", "Idioma"},
+    {"Jouer", "Arrêter", "Enregistrer", "Préparer pour APK", "+ Ajouter", "Scènes", "Mods", "Menu", "Créer", "Ouvrir", "Actualiser", "Fermer", "OK", "Annuler", "Supprimer", "Dupliquer", "Nouveau", "Choisir", "Modifier", "Effacer", "Scène", "Inspecteur", "Projets", "Nom", "Dossier", "Parent", "Définir", "Pos", "Taille", "Rot", "Couleur", "Masquer", "Verrouiller", "Script", "Dépôt", "Importer .3ne", "Sauvegarder .3ne", "Grille", "Touchez un objet dans la scène ou la liste.", "Aucun projet. Appuyez sur Créer.", "Enregistrer et fermer", "+ Nouvelle scène", "Plus", "Désactivé", "Matériau", "Intensité", "Portée", "Regarder", "FOV", "Image", "+ Ajouter un fichier", "Langue"},
+    {"Запуск", "Стоп", "Сохранить", "Подготовить для APK", "+ Добавить", "Сцены", "Моды", "Меню", "Создать", "Открыть", "Обновить", "Закрыть", "ОК", "Отмена", "Удалить", "Дублировать", "Новый", "Выбрать", "Правка", "Очистить", "Сцена", "Инспектор", "Проекты", "Имя", "Папка", "Родитель", "Задать", "Поз", "Размер", "Вращ", "Цвет", "Скрыть", "Блок", "Скрипт", "Склад", "Импорт .3ne", "Резерв .3ne", "Привязка", "Коснитесь объекта в сцене или списке.", "Проектов нет. Нажмите Создать.", "Сохранить и закрыть", "+ Новая сцена", "Ещё", "Выкл", "Материал", "Яркость", "Радиус", "Смотреть на", "FOV", "Изображение", "+ Добавить файл", "Язык"},
+};
+
+// sound is implemented in the platform section (JNI MediaPlayer)
+static bool playSoundFile(const std::string& path, bool loop);
+static void stopAllSounds();
 
 static void mkdirs(const std::string& path) {
     for (size_t i = 1; i < path.size(); i++)
@@ -454,6 +554,31 @@ struct Game {
     std::string blockMsg;               // game build: set when required mods are missing
     bool showAddons = false;
     char sceneBuf[64] = {0};
+    // rendering / camera / lights / shaders
+    GLuint customProg = 0;
+    std::string customShader;
+    bool forwardMode = false;
+    M4 lastVP = {};
+    V3 lastEye = {0, 0, 0};
+    std::map<std::string, GLuint> texCache;
+    bool customFont = false;
+    // joystick
+    float joyX = 0, joyY = 0;
+    bool joyActive = false;
+    // gizmo / snap
+    int snapIdx = 0, gizmoAxis = 0;
+    V3 gizmoStart = {0, 0, 0};
+    float gizmoAccum = 0, gizmoPxPerUnit = 1, gizmoLen = 1;
+    ImVec2 gizmoDir = ImVec2(1, 0);
+    // language, depot, file browser
+    int lang = 0;
+    std::string settingsPath, depotDir, browseDir, browseKind;
+    bool showDepot = false, showBrowser = false;
+    // 3sics physics (active while the "3sics" addon is enabled) and the asset depot
+    Physics3 physics;
+    bool physicsOn = false;
+    std::vector<std::pair<int, int>> pendingHits;
+    Depot depot;
 
     const Mesh& meshOf(int id) const { return meshes[(id >= 0 && id < MESH_COUNT) ? id : 0]; }
     void init();
@@ -517,6 +642,33 @@ struct Game {
     void loadNativeAddon(const Addon& a);
     void callMods(float dt);
     void modErr(const std::string& id);
+    // rendering
+    bool loadShader(const std::string& file);
+    GLuint getTexture(const std::string& name);
+    bool sceneCamera(V3& eye, V3& tgt, float& fov) const;
+    std::string soundPath(const std::string& name);
+    const char* tr(int k) const { return STR[lang][k]; }
+    void updateJoystick(float x, float y);
+    // gizmo
+    bool project(V3 p, ImVec2& out) const;
+    float snapVal() const { return snapIdx == 1 ? 0.5f : (snapIdx == 2 ? 1.f : 0.f); }
+    bool gizmoGeom(V3& c, ImVec2 sc[4]);
+    bool gizmoBegin(float x, float y);
+    void gizmoMove(float dx, float dy);
+    void gizmoEnd() { gizmoAxis = 0; }
+    void drawGizmo();
+    // editor: welcome, depot, browser, archives
+    void loadConfig();
+    void saveConfig();
+    void drawWelcome(ImGuiWindowFlags F);
+    void drawDepot(ImGuiWindowFlags F);
+    void drawBrowser(ImGuiWindowFlags F);
+    void browsePick(const std::string& path);
+    bool exportBackup(std::string& outPath);
+    bool importBackup(const std::string& path);
+    bool prepareApk(std::string& outPath);
+    void stepPhysics(float dt);
+    void matParams(const std::string& m, float out[4]);
 };
 static Game* G = nullptr;
 
@@ -566,15 +718,16 @@ static int l_spawn(lua_State* L) {
     std::string mn = strField(L, 1, "mesh", "cube");
     int meshId = 0;
     for (int i = 0; i < KIND_COUNT; i++) if (mn == MESH_NAMES[i]) meshId = i;
-    bool ui = meshId >= MESH_COUNT;
     Entity e;
+    V3 dp, ds, dc; std::string dt;
+    kindDefaults(meshId, dp, ds, dc, dt);
     e.id = (int)G->ents.size() + 1; e.alive = true; e.meshId = meshId; e.broken = false;
     e.name = strField(L, 1, "name", MESH_NAMES[meshId]);
-    e.text = strField(L, 1, "text", meshId == KIND_BUTTON ? "Button" : (meshId == KIND_LABEL ? "Label" : ""));
+    e.text = strField(L, 1, "text", dt);
     e.script = strField(L, 1, "script", "");
-    e.pos = vecField(L, 1, "pos", ui ? V3{50, 50, 0} : V3{0, 0, 0});
-    e.scale = vecField(L, 1, "scale", meshId == KIND_BUTTON ? V3{20, 10, 1} : (meshId == KIND_LABEL ? V3{20, 6, 1} : V3{1, 1, 1}));
-    e.color = vecField(L, 1, "color", meshId == KIND_BUTTON ? V3{0.25f, 0.45f, 0.85f} : (meshId == KIND_LABEL ? V3{1, 1, 1} : V3{0.8f, 0.8f, 0.8f}));
+    e.pos = vecField(L, 1, "pos", dp);
+    e.scale = vecField(L, 1, "scale", ds);
+    e.color = vecField(L, 1, "color", dc);
     e.rotY = numField(L, 1, "rot", 0);
     e.spin = numField(L, 1, "spin", 0);
     e.sway = numField(L, 1, "sway", 0);
@@ -583,6 +736,13 @@ static int l_spawn(lua_State* L) {
     e.folder = strField(L, 1, "folder", "");
     e.hidden = boolField(L, 1, "hidden", false);
     e.locked = boolField(L, 1, "locked", false);
+    e.intensity = numField(L, 1, "intensity", 1.f);
+    e.range = numField(L, 1, "range", 10.f);
+    e.fov = numField(L, 1, "fov", 0.9f);
+    e.material = strField(L, 1, "material", "matte");
+    e.img = strField(L, 1, "img", "");
+    e.look = vecField(L, 1, "look", {0, 1, 0});
+    e.lookId = (int)numField(L, 1, "lookid", 0);
     G->ents.push_back(e);
     if (G->mode == MODE_PLAY && !e.script.empty()) G->attachScript(e.id);  // objects spawned during play get their script
     lua_pushinteger(L, e.id);
@@ -705,7 +865,89 @@ static int l_check_raycast(lua_State* L) {
 }
 static int l_load_scene(lua_State* L) { G->pendingScene = luaL_checkstring(L, 1); return 0; }  // switches on the next frame
 
+// engine.get_bounds(id) -> minx,miny,minz,maxx,maxy,maxz  (world box, rotation ignored)
+static int l_get_bounds(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e || isUIKind(e->meshId)) return 0;
+    V3 p = G->worldPos(*e), sc = G->worldScale(*e);
+    float y0 = -0.4f, y1 = 0.4f, hx = sc.x * 0.5f, hz = sc.z * 0.5f;
+    if (e->meshId < MESH_COUNT) { y0 = MESH_Y0[e->meshId] * sc.y; y1 = MESH_Y1[e->meshId] * sc.y; }
+    else { hx = hz = 0.4f; }
+    lua_pushnumber(L, p.x - hx); lua_pushnumber(L, p.y + y0); lua_pushnumber(L, p.z - hz);
+    lua_pushnumber(L, p.x + hx); lua_pushnumber(L, p.y + y1); lua_pushnumber(L, p.z + hz);
+    return 6;
+}
+// engine.set_camera_look_at(cameraId, x, y, z)   or   (cameraId, targetObjectId)
+static int l_set_camera_look_at(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e || e->meshId != KIND_CAMERA) return 0;
+    if (lua_gettop(L) == 2) e->lookId = (int)luaL_checkinteger(L, 2);
+    else { e->look = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_checknumber(L, 4)}; e->lookId = 0; }
+    return 0;
+}
+static int l_set_camera_fov(lua_State* L) { Entity* e = entArg(L, 1); if (e && e->meshId == KIND_CAMERA) e->fov = (float)luaL_checknumber(L, 2); return 0; }
+// engine.set_light_properties(id, r, g, b, intensity, range)
+static int l_set_light_properties(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e || e->meshId != KIND_LIGHT) return 0;
+    e->color = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_checknumber(L, 4)};
+    e->intensity = (float)luaL_optnumber(L, 5, e->intensity);
+    e->range = (float)luaL_optnumber(L, 6, e->range);
+    return 0;
+}
+// engine.set_material(id, "matte"|"plastic"|"glossy"|"metal"|"glow"|"rubber")  (visible in Forward mode)
+static int l_set_material(lua_State* L) { if (Entity* e = entArg(L, 1)) e->material = luaL_checkstring(L, 2); return 0; }
+static int l_set_image(lua_State* L) { if (Entity* e = entArg(L, 1)) e->img = luaL_checkstring(L, 2); return 0; }
+// engine.load_shader("file.frag") loads <project>/shaders/file.frag and switches to Forward mode; "default" resets
+static int l_load_shader(lua_State* L) { lua_pushboolean(L, G->loadShader(luaL_checkstring(L, 1))); return 1; }
+static int l_play_sound(lua_State* L) {
+    std::string path = G->soundPath(luaL_checkstring(L, 1));
+    lua_pushboolean(L, !path.empty() && playSoundFile(path, lua_toboolean(L, 2) != 0));
+    return 1;
+}
+static int l_stop_sounds(lua_State* L) { (void)L; stopAllSounds(); return 0; }
+
+// ---- 3sics physics (needs the "3sics" addon to be enabled) ----
+// engine.physics_add_body(id, {shape="box"|"sphere", mass=1, restitution=0.3, static=false})
+static int l_physics_add_body(lua_State* L) {
+    Entity* e = entArg(L, 1);
+    if (!e || isUIKind(e->meshId) || isHelperKind(e->meshId)) return 0;
+    if (!G->physicsOn) { LOG("physics_add_body: the 3sics addon is not enabled"); lua_pushboolean(L, 0); return 1; }
+    V3 p = G->worldPos(*e), sc = G->worldScale(*e);
+    bool sphere = strField(L, 2, "shape", "box") == "sphere";
+    V3 half = sphere ? V3{sc.x * 0.5f, sc.x * 0.5f, sc.x * 0.5f} : V3{sc.x * 0.5f, sc.y * 0.5f, sc.z * 0.5f};
+    p.y += (MESH_Y0[e->meshId] + MESH_Y1[e->meshId]) * 0.5f * sc.y;   // box centre
+    G->physics.add(e->id, p, half, sphere, numField(L, 2, "mass", 1.f), numField(L, 2, "restitution", 0.3f), boolField(L, 2, "static", false));
+    lua_pushboolean(L, 1);
+    return 1;
+}
+static int l_physics_remove_body(lua_State* L) { G->physics.remove((int)luaL_checkinteger(L, 1)); return 0; }
+static int l_physics_clear(lua_State* L) { (void)L; G->physics.clear(); return 0; }
+static int l_physics_set_gravity(lua_State* L) {
+    G->physics.gravity = {(float)luaL_checknumber(L, 1), (float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3)};
+    return 0;
+}
+static int l_physics_add_impulse(lua_State* L) {
+    G->physics.impulse((int)luaL_checkinteger(L, 1), {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_checknumber(L, 4)});
+    return 0;
+}
+static int l_physics_set_velocity(lua_State* L) {
+    if (PBody* b = G->physics.get((int)luaL_checkinteger(L, 1)))
+        b->vel = {(float)luaL_checknumber(L, 2), (float)luaL_checknumber(L, 3), (float)luaL_checknumber(L, 4)};
+    return 0;
+}
+static int l_physics_get_velocity(lua_State* L) {
+    PBody* b = G->physics.get((int)luaL_checkinteger(L, 1));
+    if (!b) return 0;
+    lua_pushnumber(L, b->vel.x); lua_pushnumber(L, b->vel.y); lua_pushnumber(L, b->vel.z);
+    return 3;
+}
+
 static const luaL_Reg ENGINE_FUNCS[] = {
+    {"physics_add_body", l_physics_add_body}, {"physics_remove_body", l_physics_remove_body},
+    {"physics_clear", l_physics_clear}, {"physics_set_gravity", l_physics_set_gravity},
+    {"physics_add_impulse", l_physics_add_impulse}, {"physics_set_velocity", l_physics_set_velocity},
+    {"physics_get_velocity", l_physics_get_velocity},
     {"spawn", l_spawn}, {"find", l_find}, {"find_all", l_find_all}, {"destroy", l_destroy},
     {"set_pos", l_set_pos}, {"get_pos", l_get_pos}, {"move", l_move},
     {"set_scale", l_set_scale}, {"get_scale", l_get_scale},
@@ -713,7 +955,11 @@ static const luaL_Reg ENGINE_FUNCS[] = {
     {"set_text", l_set_text}, {"get_text", l_get_text}, {"get_name", l_get_name},
     {"set_parent", l_set_parent}, {"get_parent", l_get_parent}, {"get_world_pos", l_get_world_pos},
     {"get_distance", l_get_distance}, {"move_towards", l_move_towards}, {"check_raycast", l_check_raycast},
-    {"load_scene", l_load_scene},
+    {"get_bounds", l_get_bounds}, {"load_scene", l_load_scene},
+    {"set_camera_look_at", l_set_camera_look_at}, {"set_camera_fov", l_set_camera_fov},
+    {"set_light_properties", l_set_light_properties}, {"set_material", l_set_material},
+    {"load_shader", l_load_shader}, {"set_image", l_set_image},
+    {"play_sound", l_play_sound}, {"stop_sounds", l_stop_sounds},
     {"camera", l_camera}, {"set_orbit", l_set_orbit}, {"touch", l_touch},
     {"screen", l_screen}, {"time", l_time}, {"log", l_log}, {"load", l_load},
     {nullptr, nullptr}};
@@ -820,6 +1066,8 @@ void Game::loadScene() {
 }
 // Runs after the scene objects exist: addons, the optional global script, then the per-object scripts.
 void Game::runtimeInit() {
+    physics.clear();
+    physicsOn = false;  // the "3sics" addon switches it on in loadAddons()
     size_t n0 = ents.size();  // objects spawned later (by scripts) attach their own scripts in spawn()
     loadAddons();
     if (!readSource("scripts/main.lua").empty() && runFile("scripts/main.lua")) {
@@ -859,6 +1107,9 @@ void Game::switchScene(const std::string& name) {
     runtimeInit();
 }
 void Game::stopPlay() {
+    stopAllSounds();
+    physics.clear(); physicsOn = false;
+    joyX = joyY = 0; joyActive = false;
     ents = snapshot;
     sceneName = snapScene;
     yaw = snapYaw; pitch = snapPitch; dist = snapDist; target = snapTarget;
@@ -872,7 +1123,7 @@ bool Game::inViewport(float x, float y) const {
 #ifdef GAME_MODE
     (void)x; (void)y; return true;
 #else
-    if (screen == SCREEN_MENU || codeOpen || showAddons) return false;
+    if (screen != SCREEN_PROJECT || codeOpen || showAddons || showDepot || showBrowser) return false;
     float W = (float)w, H = (float)h;
     if (mode == MODE_PLAY) return !(x > 0.86f * W && y < 0.12f * H);
     return x > 0.25f * W && x < 0.70f * W && y > 0.12f * H;
@@ -895,6 +1146,7 @@ void Game::init() {
     meshes[8] = makeTorus(12, 6, 0.35f, 0.15f);
     meshes[9] = makeStairs();
     for (auto& m : meshes) m.upload();
+    if (!customShader.empty()) { std::string f = customShader; loadShader(f); }  // after the GL context was recreated
     if (!sceneLoaded) {  // only the first time: the open project survives the app going to background
 #ifdef GAME_MODE
         screen = SCREEN_PROJECT;
@@ -905,11 +1157,14 @@ void Game::init() {
         loadScene();
         if (blockMsg.empty()) startPlay();
 #else
+        settingsPath = fallbackDir + "setting/config.json";
+        depotDir = fallbackDir;
+        if (!depotDir.empty()) depot.init(depotDir);  // creates img/ sound/ material/
         setupBaseDir();
         g_crashPath = rootDir + "crash.log";
         installCrashHandler();
+        loadConfig();  // first run: Welcome screen; afterwards the saved language and the project menu
         refreshProjects();
-        screen = SCREEN_MENU;
 #endif
         sceneLoaded = true;
     }
@@ -917,9 +1172,131 @@ void Game::init() {
 void Game::shutdown() {  // frees GL objects only; project and Lua state are kept
     if (!prog) return;
     for (auto& m : meshes) m.destroy();
+    for (auto& kv : texCache) if (kv.second) glDeleteTextures(1, &kv.second);
+    texCache.clear();
+    if (customProg) { glDeleteProgram(customProg); customProg = 0; }
     glDeleteProgram(prog); glDeleteProgram(skyProg); glDeleteVertexArrays(1, &emptyVao);
     prog = 0;
 }
+
+bool Game::loadShader(const std::string& file) {
+    if (file.empty() || file == "default") {
+        if (customProg) glDeleteProgram(customProg);
+        customProg = 0; customShader.clear();
+        return true;
+    }
+    std::string src = readSource(("shaders/" + file).c_str());
+    if (src.empty()) { status = "Shader not found: " + file; logCrash(status); return false; }
+    g_shaderLog.clear();
+    GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, src.c_str());
+    GLuint pr = glCreateProgram();
+    glAttachShader(pr, vs); glAttachShader(pr, fs);
+    glLinkProgram(pr);
+    GLint ok = 0;
+    glGetProgramiv(pr, GL_LINK_STATUS, &ok);
+    glDeleteShader(vs); glDeleteShader(fs);
+    if (!ok) {
+        status = "Shader '" + file + "': " + (g_shaderLog.empty() ? std::string("link error") : g_shaderLog);
+        logCrash(status);
+        glDeleteProgram(pr);
+        return false;
+    }
+    if (customProg) glDeleteProgram(customProg);
+    customProg = pr; customShader = file;  // a custom shader switches the renderer to Forward mode
+    return true;
+}
+GLuint Game::getTexture(const std::string& name) {
+    if (name.empty()) return 0;
+    auto it = texCache.find(name);
+    if (it != texCache.end()) return it->second;
+    std::string data;
+    if (!depotDir.empty()) depot.read("img", name, data);
+    if (data.empty()) data = readSource(("img/" + name).c_str());
+    GLuint tex = 0;
+    if (!data.empty()) {
+        int iw = 0, ih = 0, n = 0;
+        unsigned char* px = stbi_load_from_memory((const unsigned char*)data.data(), (int)data.size(), &iw, &ih, &n, 4);
+        if (px) {
+            glGenTextures(1, &tex);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, iw, ih, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            stbi_image_free(px);
+        }
+    }
+    texCache[name] = tex;  // 0 = failed, do not retry every frame
+    return tex;
+}
+std::string Game::soundPath(const std::string& name) {
+    if (!depotDir.empty() && fs::exists(depot.pathOf("sound", name))) return depot.pathOf("sound", name).string();
+    std::string data = readSource(("sound/" + name).c_str());  // bundled with the project (game APK)
+    if (data.empty() || internalDir.empty()) return "";
+    std::string dir = internalDir + "/cache/";
+    mkdirs(dir);
+    std::string flat = name;
+    for (auto& ch : flat) if (ch == '/') ch = '_';
+    if (!writeFile(dir + flat, data)) return "";
+    return dir + flat;
+}
+bool Game::sceneCamera(V3& eye, V3& tgt, float& fov) const {  // first Camera object in the scene
+    for (const auto& e : ents) {
+        if (!e.alive || e.meshId != KIND_CAMERA) continue;
+        eye = worldPos(e);
+        tgt = (e.lookId >= 1 && e.lookId <= (int)ents.size() && ents[e.lookId - 1].alive) ? worldPos(ents[e.lookId - 1]) : e.look;
+        fov = e.fov;
+        return true;
+    }
+    return false;
+}
+void Game::matParams(const std::string& m, float out[4]) {
+    if (m.size() > 4 && m.compare(m.size() - 4, 4, ".mat") == 0) {  // material file from the depot (editor) or the project (game)
+        std::string txt;
+        if (!depotDir.empty()) depot.read("material", m, txt);
+        if (txt.empty()) txt = readSource(("material/" + m).c_str());
+        if (!txt.empty()) { parseMaterialText(txt, out); return; }
+    }
+    materialParams(m, out);
+}
+// 3sics: bodies read their position from the objects every frame (scripts may move them), then the world
+// is stepped and the movement is written back. Collision events reach Lua as a global on_collision(a, b).
+void Game::stepPhysics(float dt) {
+    for (auto& b : physics.bodies()) {
+        if (b.id < 1 || b.id > (int)ents.size() || !ents[b.id - 1].alive) continue;
+        const Entity& e = ents[b.id - 1];
+        V3 p = worldPos(e), sc = worldScale(e);
+        b.pos = b.prev = {p.x, p.y + (MESH_Y0[e.meshId] + MESH_Y1[e.meshId]) * 0.5f * sc.y, p.z};
+    }
+    physics.onCollision = [this](int a, int b) { pendingHits.push_back({a, b}); };
+    physics.step(dt);
+    for (auto& b : physics.bodies()) {
+        if (b.isStatic || b.id < 1 || b.id > (int)ents.size() || !ents[b.id - 1].alive) continue;
+        ents[b.id - 1].pos = ents[b.id - 1].pos + (b.pos - b.prev);
+    }
+    std::vector<std::pair<int, int>> hits;
+    hits.swap(pendingHits);
+    for (auto& h : hits) {
+        if (!L) break;
+        lua_getglobal(L, "on_collision");
+        if (lua_isfunction(L, -1)) {
+            lua_pushinteger(L, h.first); lua_pushinteger(L, h.second);
+            if (lua_pcall(L, 2, 0, 0) != LUA_OK) luaErr("on_collision", 0);
+        } else { lua_pop(L, 1); break; }
+    }
+}
+void Game::updateJoystick(float x, float y) {
+    if (uiDownId < 1 || uiDownId > (int)ents.size()) return;
+    ImVec2 a, b; uiRect(ents[uiDownId - 1], a, b);
+    float r = (b.y - a.y) * 0.5f;
+    if (r < 1.f) return;
+    float dx = (x - (a.x + b.x) * 0.5f) / r, dy = (y - (a.y + b.y) * 0.5f) / r;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len > 1.f) { dx /= len; dy /= len; }
+    joyX = dx; joyY = -dy;  // y up is positive
+}
+
 void Game::update(float dt) {
     t += dt;
     lastDt = dt;
@@ -937,6 +1314,10 @@ void Game::update(float dt) {
                 if (lua_pcall(L, 1, 0, 0) != LUA_OK) { luaErr("update()", 0); updateFailed = true; }
             } else lua_pop(L, 1);
         }
+        if (L) {  // virtual joystick values for scripts
+            lua_pushnumber(L, joyX); lua_setglobal(L, "joystick_x");
+            lua_pushnumber(L, joyY); lua_setglobal(L, "joystick_y");
+        }
         callMods(dt);
         for (size_t i = 0; i < ents.size(); i++) {  // per-object update(self, dt)
             if (!ents[i].alive || ents[i].script.empty() || ents[i].broken) continue;
@@ -947,38 +1328,43 @@ void Game::update(float dt) {
             }
         }
     }
+    if (screen == SCREEN_PROJECT && mode == MODE_PLAY && physicsOn && L) stepPhysics(dt);
     touchDX = touchDY = 0;
 }
 
 // ---- UI elements (buttons / labels): drawn with the ImGui draw list in both editor and game ----
 void Game::uiRect(const Entity& e, ImVec2& a, ImVec2& b) const {
-    float cx = e.pos.x / 100.f * w, cy = e.pos.y / 100.f * h;
-    float hw = e.scale.x / 100.f * w * 0.5f, hh = e.scale.y / 100.f * h * 0.5f;
+    float cx = e.pos.x / 100.f * w, cy = e.pos.y / 100.f * h, hw, hh;
+    if (e.meshId == KIND_JOYSTICK) hw = hh = e.scale.x / 100.f * h * 0.5f;  // circle: size = % of screen height
+    else { hw = e.scale.x / 100.f * w * 0.5f; hh = e.scale.y / 100.f * h * 0.5f; }
     a = ImVec2(cx - hw, cy - hh);
     b = ImVec2(cx + hw, cy + hh);
 }
-int Game::uiAt(float x, float y, bool includeLabels) const {
+// all = every UI element (editor selection); otherwise only the interactive ones (buttons, joysticks)
+int Game::uiAt(float x, float y, bool all) const {
     for (int i = (int)ents.size() - 1; i >= 0; i--) {
         const Entity& e = ents[i];
-        if (!e.alive || e.meshId < MESH_COUNT) continue;
-        if (e.meshId == KIND_LABEL && !includeLabels) continue;
+        if (!e.alive || !isUIKind(e.meshId)) continue;
+        if (!all && e.meshId != KIND_BUTTON && e.meshId != KIND_JOYSTICK) continue;
+        if (mode == MODE_EDIT && e.hidden) continue;
         ImVec2 a, b; uiRect(e, a, b);
         if (x >= a.x && x <= b.x && y >= a.y && y <= b.y) return e.id;
     }
     return 0;
 }
+
 // ---- hierarchy: world = parentWorld * local (matrix product, so scale/rotation of the parent carry over) ----
 M4 Game::worldOf(int id, int depth) const {
     const Entity& e = ents[id - 1];
     M4 L = model(e.pos, e.rotY, e.scale);
-    if (e.parent > 0 && e.parent <= (int)ents.size() && depth < 32 && e.meshId < MESH_COUNT) {
+    if (e.parent > 0 && e.parent <= (int)ents.size() && depth < 32 && !isUIKind(e.meshId)) {
         const Entity& p = ents[e.parent - 1];
-        if (p.alive && p.meshId < MESH_COUNT) return mul(worldOf(e.parent, depth + 1), L);
+        if (p.alive && !isUIKind(p.meshId)) return mul(worldOf(e.parent, depth + 1), L);
     }
     return L;
 }
 V3 Game::worldPos(const Entity& e) const {
-    if (e.meshId >= MESH_COUNT) return e.pos;
+    if (isUIKind(e.meshId)) return e.pos;
     M4 w = worldOf(e.id);
     return {w.m[12], w.m[13], w.m[14]};
 }
@@ -1012,25 +1398,28 @@ int Game::spawnBasic(const char* mesh, V3 p) {
     e.id = (int)ents.size() + 1; e.alive = true; e.broken = false; e.meshId = 0;
     for (int i = 0; i < KIND_COUNT; i++) if (!strcmp(mesh, MESH_NAMES[i])) e.meshId = i;
     e.name = MESH_NAMES[e.meshId];
-    e.pos = p;
-    bool ui = e.meshId >= MESH_COUNT;
-    e.scale = ui ? V3{20, 10, 1} : V3{1, 1, 1};
-    e.color = ui ? V3{0.25f, 0.45f, 0.85f} : V3{0.8f, 0.8f, 0.8f};
+    V3 dp, ds, dc; std::string dt;
+    kindDefaults(e.meshId, dp, ds, dc, dt);
+    e.pos = p; e.scale = ds; e.color = dc; e.text = dt;
     e.rotY = 0; e.spin = 0; e.sway = 0; e.shadow = 0;
-    if (ui) e.text = e.meshId == KIND_BUTTON ? "Button" : "Label";
     ents.push_back(e);
     return e.id;
 }
-// Ray vs. the (world-space) box of every 3D object. forPick = editor picking (skips locked / hidden).
+// Ray vs. the (world-space) box of every 3D object. forPick = editor picking (skips locked / hidden, includes camera/light helpers).
 int Game::raycast(V3 eye, V3 d, float& best, bool forPick) const {
     best = 1e30f; int hit = 0;
     for (const auto& e : ents) {
-        if (!e.alive || e.meshId >= MESH_COUNT) continue;
+        if (!e.alive || isUIKind(e.meshId)) continue;
+        if (isHelperKind(e.meshId) && !forPick) continue;
         if (forPick && (e.locked || (mode == MODE_EDIT && e.hidden))) continue;
         V3 p = worldPos(e), sc = worldScale(e);
-        float hx = sc.x * 0.5f, hz = sc.z * 0.5f;
-        if (std::fabs(e.rotY) > 1e-3f) hx = hz = 0.5f * std::sqrt(sc.x * sc.x + sc.z * sc.z);
-        float y0 = p.y + MESH_Y0[e.meshId] * sc.y, y1 = p.y + MESH_Y1[e.meshId] * sc.y;
+        float hx, hz, y0, y1;
+        if (isHelperKind(e.meshId)) { hx = hz = 0.45f; y0 = p.y - 0.45f; y1 = p.y + 0.45f; }
+        else {
+            hx = sc.x * 0.5f; hz = sc.z * 0.5f;
+            if (std::fabs(e.rotY) > 1e-3f) hx = hz = 0.5f * std::sqrt(sc.x * sc.x + sc.z * sc.z);
+            y0 = p.y + MESH_Y0[e.meshId] * sc.y; y1 = p.y + MESH_Y1[e.meshId] * sc.y;
+        }
         float lo[3] = {p.x - hx, y0, p.z - hz}, hi[3] = {p.x + hx, y1, p.z + hz};
         float o[3] = {eye.x, eye.y, eye.z}, dv[3] = {d.x, d.y, d.z};
         float tmin = 0, tmax = 1e30f; bool ok = true;
@@ -1151,7 +1540,7 @@ void Game::loadAddons() {
 #ifdef GAME_MODE
     for (const auto& id : reqs) {
         std::string src = readAsset(("addons/" + id + ".lua").c_str());
-        if (!src.empty()) loadLuaAddon(id, src);
+        if (!src.empty()) { loadLuaAddon(id, src); if (id == "3sics") physicsOn = true; }
     }
 #else
     addons = scanAddons();
@@ -1159,6 +1548,7 @@ void Game::loadAddons() {
         if (!a.enabled || !a.supported) continue;  // ".disable" files are ignored
         if (a.ext == ".lua") { std::string src; if (readFile(a.dir + a.file, src)) loadLuaAddon(a.id, src); }
         else loadNativeAddon(a);
+        if (a.id == "3sics") physicsOn = true;  // 3sics = the physics built into the engine, an addon you can switch off
     }
 #endif
 }
@@ -1191,23 +1581,35 @@ void Game::drawEntityUI() {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     ImFont* font = ImGui::GetFont();
     for (const auto& e : ents) {
-        if (!e.alive || e.meshId < MESH_COUNT) continue;
+        if (!e.alive || !isUIKind(e.meshId)) continue;
+        if (mode == MODE_EDIT && e.hidden) continue;
         ImVec2 a, b; uiRect(e, a, b);
         float bh = b.y - a.y;
+        int cr = (int)(e.color.x * 255), cg = (int)(e.color.y * 255), cb = (int)(e.color.z * 255);
         if (e.meshId == KIND_BUTTON) {
             bool pressed = mode == MODE_PLAY && uiDownId == e.id && touchDown;
             float k = pressed ? 0.7f : 1.f;
-            ImU32 fill = IM_COL32((int)(e.color.x * 255 * k), (int)(e.color.y * 255 * k), (int)(e.color.z * 255 * k), 255);
-            dl->AddRectFilled(a, b, fill, bh * 0.2f);
+            dl->AddRectFilled(a, b, IM_COL32((int)(cr * k), (int)(cg * k), (int)(cb * k), 255), bh * 0.2f);
             dl->AddRect(a, b, IM_COL32(255, 255, 255, 90), bh * 0.2f, 0, 2.f);
             float fp = bh * 0.45f;
             ImVec2 ts = font->CalcTextSizeA(fp, 100000.f, 0.f, e.text.c_str());
             dl->AddText(font, fp, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), IM_COL32(255, 255, 255, 255), e.text.c_str());
-        } else {
+        } else if (e.meshId == KIND_LABEL) {
             float fp = bh;
             ImVec2 ts = font->CalcTextSizeA(fp, 100000.f, 0.f, e.text.c_str());
-            ImU32 col = IM_COL32((int)(e.color.x * 255), (int)(e.color.y * 255), (int)(e.color.z * 255), 255);
-            dl->AddText(font, fp, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), col, e.text.c_str());
+            dl->AddText(font, fp, ImVec2((a.x + b.x - ts.x) * 0.5f, (a.y + b.y - ts.y) * 0.5f), IM_COL32(cr, cg, cb, 255), e.text.c_str());
+        } else if (e.meshId == KIND_JOYSTICK) {
+            ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+            float r = bh * 0.5f;
+            dl->AddCircleFilled(c, r, IM_COL32(cr, cg, cb, 60), 48);
+            dl->AddCircle(c, r, IM_COL32(255, 255, 255, 150), 48, 3.f);
+            ImVec2 kn = c;
+            if (mode == MODE_PLAY && joyActive && uiDownId == e.id) { kn.x += joyX * r * 0.6f; kn.y -= joyY * r * 0.6f; }
+            dl->AddCircleFilled(kn, r * 0.35f, IM_COL32(255, 255, 255, 190), 32);
+        } else {  // image from the depot
+            GLuint tex = getTexture(e.img);
+            if (tex) dl->AddImage((ImTextureID)(intptr_t)tex, a, b);
+            else dl->AddRect(a, b, IM_COL32(255, 255, 255, 120), 0.f, 0, 2.f);
         }
         if (mode == MODE_EDIT && e.id == selected) dl->AddRect(a, b, IM_COL32(255, 220, 60, 255), 6.f, 0, 4.f);
     }
@@ -1224,38 +1626,80 @@ void Game::render() {
     glUseProgram(skyProg);
     glBindVertexArray(emptyVao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
-    if (screen == SCREEN_MENU) return;
+    if (screen != SCREEN_PROJECT) return;
 
     glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
     V3 eye = target + V3{std::cos(pitch) * std::sin(yaw), std::sin(pitch), std::cos(pitch) * std::cos(yaw)} * dist;
-    M4 vp = mul(perspective(0.9f, (float)w / h, 0.3f, 200.f), lookAt(eye, target, {0, 1, 0}));
+    V3 look = target;
+    float fov = 0.9f;
+    if (mode == MODE_PLAY) {  // a Camera object in the scene takes over while playing
+        V3 ce, ct; float cf;
+        if (sceneCamera(ce, ct, cf)) { eye = ce; look = ct; fov = cf; }
+    }
+    M4 vp = mul(perspective(fov, (float)w / h, 0.3f, 200.f), lookAt(eye, look, {0, 1, 0}));
+    lastVP = vp; lastEye = eye;
 
-    glUseProgram(prog);
-    glUniformMatrix4fv(glGetUniformLocation(prog, "uVP"), 1, GL_FALSE, vp.m);
-    glUniform3f(glGetUniformLocation(prog, "uCam"), eye.x, eye.y, eye.z);
-    glUniform3f(glGetUniformLocation(prog, "uSun"), 0.5f, 0.8f, 0.3f);
-    glUniform3f(glGetUniformLocation(prog, "uFog"), fog.x, fog.y, fog.z);
-    glUniform1f(glGetUniformLocation(prog, "uTime"), t);
-    GLint uModel = glGetUniformLocation(prog, "uModel"), uColor = glGetUniformLocation(prog, "uColor");
-    GLint uSway = glGetUniformLocation(prog, "uSway"), uAlpha = glGetUniformLocation(prog, "uAlpha");
+    float lp[12] = {0}, lc[12] = {0}, lr[4] = {1, 1, 1, 1};
+    int nl = 0;
+    for (const auto& e : ents) {
+        if (nl >= 4) break;
+        if (!e.alive || e.meshId != KIND_LIGHT) continue;
+        if (mode == MODE_EDIT && e.hidden) continue;
+        V3 wp = worldPos(e);
+        lp[nl * 3] = wp.x; lp[nl * 3 + 1] = wp.y; lp[nl * 3 + 2] = wp.z;
+        lc[nl * 3] = e.color.x * e.intensity; lc[nl * 3 + 1] = e.color.y * e.intensity; lc[nl * 3 + 2] = e.color.z * e.intensity;
+        lr[nl] = e.range > 0.1f ? e.range : 0.1f;
+        nl++;
+    }
+    forwardMode = nl > 0 || customProg != 0;  // Unlit until the first light or custom shader appears
+
+    GLuint P = customProg ? customProg : prog;
+    glUseProgram(P);
+    glUniformMatrix4fv(glGetUniformLocation(P, "uVP"), 1, GL_FALSE, vp.m);
+    glUniform3f(glGetUniformLocation(P, "uCam"), eye.x, eye.y, eye.z);
+    glUniform3f(glGetUniformLocation(P, "uSun"), 0.5f, 0.8f, 0.3f);
+    glUniform3f(glGetUniformLocation(P, "uFog"), fog.x, fog.y, fog.z);
+    glUniform1f(glGetUniformLocation(P, "uTime"), t);
+    glUniform1i(glGetUniformLocation(P, "uForward"), forwardMode ? 1 : 0);
+    glUniform1i(glGetUniformLocation(P, "uLN"), nl);
+    glUniform3fv(glGetUniformLocation(P, "uLP"), 4, lp);
+    glUniform3fv(glGetUniformLocation(P, "uLC"), 4, lc);
+    glUniform1fv(glGetUniformLocation(P, "uLR"), 4, lr);
+    GLint uModel = glGetUniformLocation(P, "uModel"), uColor = glGetUniformLocation(P, "uColor");
+    GLint uSway = glGetUniformLocation(P, "uSway"), uAlpha = glGetUniformLocation(P, "uAlpha");
+    GLint uMat = glGetUniformLocation(P, "uMat");
 
     for (int pass = 0; pass < 2; pass++) {  // 0: solid, 1: blob shadows
         if (pass == 1) { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); }
         glUniform1f(uAlpha, pass == 1 ? 0.35f : 1.0f);
         for (const auto& e : ents) {
-            if (!e.alive || e.meshId >= MESH_COUNT) continue;
+            if (!e.alive || isUIKind(e.meshId)) continue;
             if (mode == MODE_EDIT && e.hidden) continue;
+            bool helper = isHelperKind(e.meshId);
+            if (helper && (mode != MODE_EDIT || pass == 1)) continue;  // camera / light markers: editor only
             if (pass == 0) {
                 V3 c = e.color;
                 if (mode == MODE_EDIT && e.id == selected) {  // selection highlight
                     float k = 0.30f + 0.15f * std::sin(t * 6.f);
                     c = c * (1.f - k) + V3{1, 1, 1} * k;
                 }
-                M4 m = worldOf(e.id);
+                M4 m;
+                const Mesh* mesh;
+                float mat[4];
+                if (helper) {
+                    m = model(worldPos(e), 0, {0.8f, 0.8f, 0.8f});
+                    mesh = e.meshId == KIND_CAMERA ? &meshes[5] : &meshes[4];
+                    materialParams("glow", mat);
+                } else {
+                    m = worldOf(e.id);
+                    mesh = &meshOf(e.meshId);
+                    matParams(e.material, mat);
+                }
                 glUniform3f(uColor, c.x, c.y, c.z);
-                glUniform1f(uSway, e.sway);
+                glUniform1f(uSway, helper ? 0.f : e.sway);
+                glUniform4f(uMat, mat[0], mat[1], mat[2], mat[3]);
                 glUniformMatrix4fv(uModel, 1, GL_FALSE, m.m);
-                meshOf(e.meshId).draw();
+                mesh->draw();
             } else if (e.shadow > 0) {
                 V3 wp = worldPos(e);
                 M4 m = model({wp.x, 0.02f, wp.z}, 0, {e.shadow, 1, e.shadow});
@@ -1271,7 +1715,7 @@ void Game::render() {
 
 void Game::drawUI() {
     ImGuiIO& io = ImGui::GetIO();
-    io.FontGlobalScale = h / 520.f;
+    io.FontGlobalScale = customFont ? h / 1080.f : h / 520.f;
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
     ImGui::NewFrame();
@@ -1297,6 +1741,352 @@ static const char* DEFAULT_SCENE =
     "engine.spawn{ name=\"Ground\", mesh=\"cube\", pos={0,-0.5,0}, scale={60,1,60}, color={0.42,0.66,0.38}, rot=0, spin=0, sway=0, shadow=0 }\n"
     "engine.spawn{ name=\"Cube\", mesh=\"cube\", pos={0,0.5,0}, scale={1,1,1}, color={0.95,0.75,0.25}, rot=0, spin=0, sway=0, shadow=1.4 }\n";
 
+static const char* BUILTIN_3SICS = R"LUA(-- 3sics: mid-level physics (gravity, AABB + sphere collisions, restitution, mass / impulse).
+-- The physics itself is built into 3gine (C++). This file is the switch: rename it to 3sics.lua.disable to turn it off.
+-- Scripts use: engine.physics_add_body(id, {shape="box"|"sphere", mass=1, restitution=0.3, static=false})
+--   engine.physics_set_gravity(x,y,z)  engine.physics_add_impulse(id,x,y,z)  engine.physics_set_velocity(id,x,y,z)
+--   engine.physics_get_velocity(id)    engine.physics_remove_body(id)         engine.physics_clear()
+--   function on_collision(a, b) end    -- global callback when two bodies start touching
+return {}
+)LUA";
+
+// ---- zip archives (stored, no compression): used for .3ne backups and the "Prepare for APK" package ----
+static uint32_t crc32buf(const std::string& d) {
+    static uint32_t T[256]; static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1); T[i] = c; }
+        init = true;
+    }
+    uint32_t c = 0xFFFFFFFFu;
+    for (unsigned char b : d) c = T[(c ^ b) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+static void put16(std::string& s, unsigned v) { s.push_back((char)(v & 0xFF)); s.push_back((char)((v >> 8) & 0xFF)); }
+static void put32(std::string& s, uint32_t v) { for (int i = 0; i < 4; i++) s.push_back((char)((v >> (8 * i)) & 0xFF)); }
+static uint32_t get16(const std::string& s, size_t o) { return (uint32_t)(unsigned char)s[o] | ((uint32_t)(unsigned char)s[o + 1] << 8); }
+static uint32_t get32(const std::string& s, size_t o) { return get16(s, o) | (get16(s, o + 2) << 16); }
+struct ZipEntry { std::string name, data; };
+static bool writeZip(const std::string& path, const std::vector<ZipEntry>& files) {
+    std::string out, cd;
+    for (const auto& f : files) {
+        uint32_t crc = crc32buf(f.data), sz = (uint32_t)f.data.size(), off = (uint32_t)out.size();
+        put32(out, 0x04034b50); put16(out, 20); put16(out, 0); put16(out, 0); put16(out, 0); put16(out, 0x21);
+        put32(out, crc); put32(out, sz); put32(out, sz); put16(out, (unsigned)f.name.size()); put16(out, 0);
+        out += f.name; out += f.data;
+        put32(cd, 0x02014b50); put16(cd, 20); put16(cd, 20); put16(cd, 0); put16(cd, 0); put16(cd, 0); put16(cd, 0x21);
+        put32(cd, crc); put32(cd, sz); put32(cd, sz); put16(cd, (unsigned)f.name.size());
+        put16(cd, 0); put16(cd, 0); put16(cd, 0); put16(cd, 0); put32(cd, 0); put32(cd, off);
+        cd += f.name;
+    }
+    uint32_t cdOff = (uint32_t)out.size();
+    out += cd;
+    put32(out, 0x06054b50); put16(out, 0); put16(out, 0); put16(out, (unsigned)files.size()); put16(out, (unsigned)files.size());
+    put32(out, (uint32_t)cd.size()); put32(out, cdOff); put16(out, 0);
+    return writeFile(path, out);
+}
+static bool readZip(const std::string& path, std::vector<ZipEntry>& out) {  // reads archives written by writeZip (stored entries)
+    std::string z;
+    if (!readFile(path, z) || z.size() < 22) return false;
+    size_t eocd = std::string::npos;
+    for (size_t i = z.size() - 22;; i--) {
+        if (get32(z, i) == 0x06054b50) { eocd = i; break; }
+        if (i == 0 || z.size() - i > 70000) break;
+    }
+    if (eocd == std::string::npos) return false;
+    uint32_t count = get16(z, eocd + 10);
+    size_t p = get32(z, eocd + 16);
+    for (uint32_t k = 0; k < count; k++) {
+        if (p + 46 > z.size() || get32(z, p) != 0x02014b50) return false;
+        uint32_t method = get16(z, p + 10), csize = get32(z, p + 20), nlen = get16(z, p + 28);
+        uint32_t elen = get16(z, p + 30), clen = get16(z, p + 32), loff = get32(z, p + 42);
+        std::string name = z.substr(p + 46, nlen);
+        p += 46 + nlen + elen + clen;
+        if (method != 0) return false;
+        if ((size_t)loff + 30 > z.size() || get32(z, loff) != 0x04034b50) return false;
+        size_t ds = (size_t)loff + 30 + get16(z, loff + 26) + get16(z, loff + 28);
+        if (ds + csize > z.size()) return false;
+        if (name.empty() || name.back() == '/') continue;
+        out.push_back({name, z.substr(ds, csize)});
+    }
+    return true;
+}
+static void listFilesRec(const std::string& dir, const std::string& rel, std::vector<std::string>& out, int depth) {
+    for (const auto& f : listDir(dir + rel, false)) out.push_back(rel + f);
+    if (depth >= 8) return;
+    for (const auto& d : listDir(dir + rel, true)) listFilesRec(dir, rel + d + "/", out, depth + 1);
+}
+static std::string lowerExt(const std::string& n) {
+    size_t dot = n.rfind('.');
+    if (dot == std::string::npos) return "";
+    std::string e = n.substr(dot + 1);
+    for (auto& c : e) c = (char)tolower((unsigned char)c);
+    return e;
+}
+static std::string baseName(const std::string& path) {
+    size_t sl = path.rfind('/');
+    return sl == std::string::npos ? path : path.substr(sl + 1);
+}
+static std::string lab(const char* text, const char* id) { return std::string(text) + "###" + id; }
+static void openBrowser(Game& g, const char* kind) {
+    g.browseKind = kind;
+    if (g.browseDir.empty()) g.browseDir = "/sdcard/Download/";
+    if (listDir(g.browseDir, true).empty() && listDir(g.browseDir, false).empty()) g.browseDir = "/sdcard/";
+    g.showBrowser = true;
+}
+
+void Game::loadConfig() {
+    std::string cfg;
+    if (readFile(settingsPath, cfg)) {
+        size_t k = cfg.find("\"language\"");
+        if (k != std::string::npos) {
+            size_t c = cfg.find(':', k), q1 = c == std::string::npos ? c : cfg.find('"', c);
+            size_t q2 = q1 == std::string::npos ? q1 : cfg.find('"', q1 + 1);
+            if (q2 != std::string::npos) {
+                std::string code = cfg.substr(q1 + 1, q2 - q1 - 1);
+                for (int i = 0; i < 6; i++) if (code == LANG_CODES[i]) lang = i;
+            }
+        }
+        screen = SCREEN_MENU;
+    } else { lang = 0; screen = SCREEN_WELCOME; }  // first launch: ask for the language once
+}
+void Game::saveConfig() {
+    size_t sl = settingsPath.rfind('/');
+    if (sl != std::string::npos) mkdirs(settingsPath.substr(0, sl + 1));
+    writeFile(settingsPath, std::string("{\n  \"language\": \"") + LANG_CODES[lang] + "\"\n}\n");
+}
+void Game::drawWelcome(ImGuiWindowFlags F) {
+    float W = (float)w, H = (float)h;
+    ImGui::SetNextWindowPos(ImVec2(0.2f * W, 0.08f * H));
+    ImGui::SetNextWindowSize(ImVec2(0.6f * W, 0.84f * H));
+    ImGui::Begin("Welcome", nullptr, F);
+    ImGui::SetWindowFontScale(2.2f);
+    ImGui::TextUnformatted("Welcome");
+    ImGui::SetWindowFontScale(1.f);
+    ImGui::Separator();
+    ImGui::TextUnformatted("Choose your language:");
+    for (int i = 0; i < 6; i++) if (ImGui::Selectable(LANG_NAMES[i], lang == i)) lang = i;
+    ImGui::Separator();
+    if (ImGui::Button("OK", ImVec2(-1, 0))) { saveConfig(); screen = SCREEN_MENU; }
+    ImGui::End();
+}
+
+// ---- depot (asset store): <files>/img and <files>/sound, plus a simple file browser ----
+void Game::browsePick(const std::string& path) {
+    if (browseKind == "3ne") { importBackup(path); showBrowser = false; return; }
+    std::string err;
+    status = depot.addFile(path, browseKind, &err) ? "Added: " + baseName(path) : "Could not add: " + err;
+    showBrowser = false;
+}
+void Game::drawBrowser(ImGuiWindowFlags F) {
+    float W = (float)w, H = (float)h;
+    ImGui::SetNextWindowPos(ImVec2(0.05f * W, 0.05f * H));
+    ImGui::SetNextWindowSize(ImVec2(0.9f * W, 0.9f * H));
+    ImGui::Begin("File browser###browser", nullptr, F);
+    if (ImGui::Button(tr(S_CLOSE))) showBrowser = false;
+    ImGui::SameLine();
+    if (ImGui::Button("..") && browseDir.size() > 1) {
+        size_t sl = browseDir.rfind('/', browseDir.size() - 2);
+        browseDir = sl == std::string::npos ? "/" : browseDir.substr(0, sl + 1);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("/sdcard")) browseDir = "/sdcard/";
+    ImGui::SameLine();
+    if (ImGui::Button("Download")) browseDir = "/sdcard/Download/";
+    ImGui::TextWrapped("%s", browseDir.c_str());
+    ImGui::Separator();
+    if (ImGui::BeginChild("blist", ImVec2(0, 0), 0)) {
+        std::string next;
+        for (const auto& d : listDir(browseDir, true)) {
+            std::string l = "[" + d + "]###d_" + d;
+            if (ImGui::Selectable(l.c_str())) next = browseDir + d + "/";
+        }
+        std::string pick;
+        for (const auto& f : listDir(browseDir, false)) {
+            std::string e = lowerExt(f);
+            bool ok = (browseKind == "img" && (e == "png" || e == "jpg" || e == "jpeg")) ||
+                      (browseKind == "sound" && (e == "mp3" || e == "ogg" || e == "wav")) ||
+                      (browseKind == "material" && e == "mat") ||
+                      (browseKind == "3ne" && e == "3ne");
+            if (ok && ImGui::Selectable((f + "###f_" + f).c_str())) pick = browseDir + f;
+        }
+        if (!next.empty()) browseDir = next;
+        if (!pick.empty()) browsePick(pick);
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+void Game::drawDepot(ImGuiWindowFlags F) {
+    float W = (float)w, H = (float)h;
+    ImGui::SetNextWindowPos(ImVec2(0.08f * W, 0.08f * H));
+    ImGui::SetNextWindowSize(ImVec2(0.84f * W, 0.84f * H));
+    ImGui::Begin(lab(tr(S_DEPOT), "depot").c_str(), nullptr, F);
+    if (ImGui::Button(tr(S_CLOSE))) showDepot = false;
+    ImGui::TextWrapped("%s", depotDir.c_str());
+    ImGui::TextWrapped("img/ (png, jpg), sound/ (mp3, ogg, wav), material/ (.mat). Files dropped in with a file manager show up here too.");
+    int uid = 0;
+    for (const char* kind : {"img", "sound", "material"}) {
+        ImGui::Separator();
+        ImGui::TextUnformatted(kind);
+        std::vector<std::string> names = depot.list(kind);
+        for (const auto& n : names) {
+            ImGui::PushID(uid++);
+            ImGui::TextUnformatted(n.c_str());
+            if (!strcmp(kind, "sound")) { ImGui::SameLine(); if (ImGui::SmallButton("Play")) playSoundFile(depot.pathOf("sound", n).string(), false); }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(S_DELETE))) depot.remove(kind, n);
+            ImGui::PopID();
+        }
+        if (ImGui::Button(lab(tr(S_ADD_FILE), (std::string("add_") + kind).c_str()).c_str())) openBrowser(*this, kind);
+    }
+    ImGui::Separator();
+    if (ImGui::Button("Stop sounds")) stopAllSounds();
+    ImGui::End();
+}
+
+// ---- .3ne backup, import and "Prepare for APK" ----
+bool Game::exportBackup(std::string& outPath) {
+    if (projectDir.empty()) return false;
+    saveProject();
+    std::vector<ZipEntry> files;
+    std::vector<std::string> rels;
+    listFilesRec(projectDir, "", rels, 0);
+    for (const auto& rel : rels) { std::string d; if (readFile(projectDir + rel, d)) files.push_back({"project/" + rel, d}); }
+    for (const char* kind : {"img", "sound", "material"})
+        for (const auto& f : listDir(depotDir + kind + "/", false)) { std::string d; if (readFile(depotDir + kind + "/" + f, d)) files.push_back({std::string("depot/") + kind + "/" + f, d}); }
+    std::string dir = "/sdcard/Download/3Gine-project/" + projectName + "/";
+    mkdirs(dir);
+    outPath = dir + projectName + ".3ne";
+    return writeZip(outPath, files);
+}
+bool Game::importBackup(const std::string& path) {
+    std::vector<ZipEntry> files;
+    if (!readZip(path, files)) { status = "Not a valid .3ne file"; return false; }
+    std::string name = baseName(path);
+    if (name.size() > 4 && lowerExt(name) == "3ne") name = name.substr(0, name.size() - 4);
+    name = cleanName(name);
+    if (name.empty()) name = "imported";
+    std::string fin = name;
+    for (int n = 2; fileExists(baseDir + fin + "/scene.lua"); n++) fin = name + "_" + std::to_string(n);
+    for (const auto& f : files) {
+        if (f.name.find("..") != std::string::npos || f.name[0] == '/') continue;
+        std::string dst;
+        if (f.name.compare(0, 8, "project/") == 0) dst = baseDir + fin + "/" + f.name.substr(8);
+        else if (f.name.compare(0, 6, "depot/") == 0 && !depotDir.empty()) dst = depotDir + f.name.substr(6);
+        else continue;
+        mkdirs(dst.substr(0, dst.rfind('/') + 1));
+        writeFile(dst, f.data);
+    }
+    refreshProjects();
+    status = "Imported: " + fin;
+    return true;
+}
+// The editor cannot compile an APK on the phone, so it packs everything needed to build one: the engine source
+// (bundled in this app), the project and the depot files. Output: Download/3Gine-project/<name>/<name>.zip
+bool Game::prepareApk(std::string& outPath) {
+    std::string man = readAsset("engine_src/manifest.txt");
+    if (man.empty()) { status = "Engine sources are not bundled in this APK (build it from the repo with Gradle)."; return false; }
+    std::vector<ZipEntry> files;
+    size_t pos = 0;
+    while (pos < man.size()) {
+        size_t nl = man.find('\n', pos);
+        if (nl == std::string::npos) nl = man.size();
+        std::string line = man.substr(pos, nl - pos);
+        pos = nl + 1;
+        size_t bar = line.find('|');
+        if (bar == std::string::npos) continue;
+        std::string data = readAsset(("engine_src/" + line.substr(0, bar)).c_str());
+        files.push_back({line.substr(bar + 1), data});
+    }
+    std::vector<std::string> rels;
+    listFilesRec(projectDir, "", rels, 0);
+    for (const auto& rel : rels) { std::string d; if (readFile(projectDir + rel, d)) files.push_back({"game/" + projectName + "/" + rel, d}); }
+    for (const char* kind : {"img", "sound", "material"})
+        for (const auto& f : listDir(depotDir + kind + "/", false)) {
+            std::string d;
+            if (readFile(depotDir + kind + "/" + f, d)) files.push_back({"game/" + projectName + "/" + kind + "/" + f, d});
+        }
+    files.push_back({"game/startup.txt", projectName + "\n"});
+    files.push_back({"README_BUILD.txt",
+        "3gine - project prepared for APK\n\n"
+        "1. Extract this zip and upload everything to a GitHub repository (Termux: git add -A, commit, push).\n"
+        "2. GitHub Actions builds both APKs. Download the artifact '3gine-game-apk' - that is your game.\n"
+        "3. Or open the folder in Android Studio and run: gradle assembleGameDebug\n\n"
+        "The game inside is the project in game/" + projectName + "/ (game/startup.txt names it).\n"});
+    std::string dir = "/sdcard/Download/3Gine-project/" + projectName + "/";
+    mkdirs(dir);
+    outPath = dir + projectName + ".zip";
+    return writeZip(outPath, files);
+}
+
+// ---- move gizmo with snap ----
+bool Game::project(V3 p, ImVec2& out) const {
+    const float* m = lastVP.m;
+    float x = m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12];
+    float y = m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13];
+    float wv = m[3] * p.x + m[7] * p.y + m[11] * p.z + m[15];
+    if (wv < 0.05f) return false;
+    out = ImVec2((x / wv * 0.5f + 0.5f) * w, (1.f - (y / wv * 0.5f + 0.5f)) * h);
+    return true;
+}
+bool Game::gizmoGeom(V3& c, ImVec2 sc[4]) {
+    if (mode != MODE_EDIT || screen != SCREEN_PROJECT || codeOpen || selected < 1 || selected > (int)ents.size()) return false;
+    const Entity& e = ents[selected - 1];
+    if (!e.alive || isUIKind(e.meshId) || e.locked) return false;
+    c = worldPos(e);
+    V3 dd = c - lastEye;
+    gizmoLen = std::sqrt(dot(dd, dd)) * 0.15f;
+    if (gizmoLen < 0.2f) gizmoLen = 0.2f;
+    V3 tips[3] = {c + V3{gizmoLen, 0, 0}, c + V3{0, gizmoLen, 0}, c + V3{0, 0, gizmoLen}};
+    if (!project(c, sc[0])) return false;
+    for (int i = 0; i < 3; i++) if (!project(tips[i], sc[i + 1])) return false;
+    return true;
+}
+bool Game::gizmoBegin(float x, float y) {
+    V3 c; ImVec2 sc[4];
+    if (!gizmoGeom(c, sc)) return false;
+    float best = 0.045f * h; int ax = 0;
+    for (int i = 1; i <= 3; i++) {
+        float dx = sc[i].x - sc[0].x, dy = sc[i].y - sc[0].y, l2 = dx * dx + dy * dy;
+        float t = l2 > 0 ? ((x - sc[0].x) * dx + (y - sc[0].y) * dy) / l2 : 0.f;
+        t = t < 0.f ? 0.f : (t > 1.f ? 1.f : t);
+        float px = sc[0].x + t * dx - x, py = sc[0].y + t * dy - y;
+        float dist = std::sqrt(px * px + py * py);
+        if (dist < best) { best = dist; ax = i; }
+    }
+    if (!ax) return false;
+    float dx = sc[ax].x - sc[0].x, dy = sc[ax].y - sc[0].y, pl = std::sqrt(dx * dx + dy * dy);
+    if (pl < 4.f) return false;
+    gizmoAxis = ax;
+    gizmoStart = ents[selected - 1].pos;
+    gizmoAccum = 0;
+    gizmoPxPerUnit = pl / gizmoLen;
+    gizmoDir = ImVec2(dx / pl, dy / pl);
+    return true;
+}
+void Game::gizmoMove(float dx, float dy) {
+    if (!gizmoAxis || selected < 1 || selected > (int)ents.size()) return;
+    gizmoAccum += (dx * gizmoDir.x + dy * gizmoDir.y) / gizmoPxPerUnit;
+    float v = (gizmoAxis == 1 ? gizmoStart.x : (gizmoAxis == 2 ? gizmoStart.y : gizmoStart.z)) + gizmoAccum;
+    float sv = snapVal();
+    if (sv > 0.f) v = std::round(v / sv) * sv;  // snap to the 0.5 / 1.0 grid
+    Entity& e = ents[selected - 1];
+    if (gizmoAxis == 1) e.pos.x = v; else if (gizmoAxis == 2) e.pos.y = v; else e.pos.z = v;
+}
+void Game::drawGizmo() {
+    V3 c; ImVec2 sc[4];
+    if (!gizmoGeom(c, sc)) return;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    float u = h / 1080.f;
+    ImU32 cols[3] = {IM_COL32(255, 70, 70, 255), IM_COL32(80, 220, 90, 255), IM_COL32(80, 140, 255, 255)};
+    const char* names[3] = {"X", "Y", "Z"};
+    for (int i = 0; i < 3; i++) {
+        bool act = gizmoAxis == i + 1;
+        dl->AddLine(sc[0], sc[i + 1], cols[i], (act ? 9.f : 6.f) * u);
+        dl->AddCircleFilled(sc[i + 1], (act ? 24.f : 17.f) * u, cols[i], 20);
+        dl->AddText(ImVec2(sc[i + 1].x + 16.f * u, sc[i + 1].y - 14.f * u), IM_COL32(255, 255, 255, 255), names[i]);
+    }
+}
+
 void Game::setupBaseDir() {
     std::string cands[2] = {"/sdcard/Documents/3gine/", fallbackDir};
     for (const auto& c : cands) {
@@ -1307,6 +2097,9 @@ void Game::setupBaseDir() {
             remove(probe.c_str());
             rootDir = c; baseDir = c + "game/"; addonsDir = c + "addons/";
             mkdirs(addonsDir);
+            // 3sics (physics) is installed once as a normal addon: disable it by renaming it to 3sics.lua.disable
+            if (!fileExists(addonsDir + "3sics.lua") && !fileExists(addonsDir + "3sics.lua.disable"))
+                writeFile(addonsDir + "3sics.lua", BUILTIN_3SICS);
             return;
         }
     }
@@ -1346,10 +2139,10 @@ bool Game::saveProject() {
     if (projectDir.empty()) return false;
     mkdirs(projectDir + "scripts/");
     mkdirs(projectDir + "scenes/");
-    std::vector<int> remap(ents.size() + 1, 0);  // ids are re-numbered in file order; parents follow
+    std::vector<int> remap(ents.size() + 1, 0);  // ids are re-numbered in file order; parents / targets follow
     int n = 0;
     for (const auto& e : ents) if (e.alive) remap[e.id] = ++n;
-    char buf[1536];
+    char buf[2048];
     std::string out = "-- 3gine scene. Generated by the editor (Save). Safe to hand-edit.\n";
     snprintf(buf, sizeof buf, "engine.camera{ yaw=%.3f, pitch=%.3f, dist=%.3f, target={%.3f,%.3f,%.3f} }\n",
              yaw, pitch, dist, target.x, target.y, target.z);
@@ -1357,13 +2150,16 @@ bool Game::saveProject() {
     for (const auto& e : ents) {
         if (!e.alive) continue;
         int par = (e.parent > 0 && e.parent <= (int)ents.size()) ? remap[e.parent] : 0;
+        int lk = (e.lookId > 0 && e.lookId <= (int)ents.size()) ? remap[e.lookId] : 0;
         snprintf(buf, sizeof buf,
                  "engine.spawn{ name=\"%s\", mesh=\"%s\", pos={%.3f,%.3f,%.3f}, scale={%.3f,%.3f,%.3f}, "
                  "color={%.3f,%.3f,%.3f}, rot=%.3f, spin=%.3f, sway=%.3f, shadow=%.3f, text=\"%s\", script=\"%s\", "
-                 "parent=%d, folder=\"%s\", hidden=%s, locked=%s }\n",
+                 "parent=%d, folder=\"%s\", hidden=%s, locked=%s, intensity=%.3f, range=%.3f, fov=%.3f, "
+                 "material=\"%s\", img=\"%s\", look={%.3f,%.3f,%.3f}, lookid=%d }\n",
                  esc(e.name).c_str(), MESH_NAMES[e.meshId], e.pos.x, e.pos.y, e.pos.z, e.scale.x, e.scale.y, e.scale.z,
                  e.color.x, e.color.y, e.color.z, e.rotY, e.spin, e.sway, e.shadow, esc(e.text).c_str(), esc(e.script).c_str(),
-                 par, esc(e.folder).c_str(), e.hidden ? "true" : "false", e.locked ? "true" : "false");
+                 par, esc(e.folder).c_str(), e.hidden ? "true" : "false", e.locked ? "true" : "false",
+                 e.intensity, e.range, e.fov, esc(e.material).c_str(), esc(e.img).c_str(), e.look.x, e.look.y, e.look.z, lk);
         out += buf;
     }
     if (!writeFile(projectDir + sceneFile(sceneName), out)) { status = "Save failed: " + projectDir; return false; }
@@ -1409,17 +2205,14 @@ int Game::addEntity(int kind) {
     Entity e;
     e.id = (int)ents.size() + 1; e.alive = true; e.meshId = kind; e.broken = false;
     e.name = ADD_NAMES[kind];
+    V3 dp, ds, dc; std::string dt;
+    kindDefaults(kind, dp, ds, dc, dt);
+    e.scale = ds; e.color = dc; e.text = dt;
     e.rotY = 0; e.spin = 0; e.sway = 0; e.shadow = 0;
-    if (kind >= MESH_COUNT) {
-        e.pos = {50, 50, 0};
-        e.scale = kind == KIND_BUTTON ? V3{20, 10, 1} : V3{20, 6, 1};
-        e.color = kind == KIND_BUTTON ? V3{0.25f, 0.45f, 0.85f} : V3{1, 1, 1};
-        e.text = kind == KIND_BUTTON ? "Button" : "Label";
-    } else {
-        e.pos = {target.x, -MESH_Y0[kind], target.z};
-        e.scale = {1, 1, 1};
-        e.color = (kind == 1 || kind == 5) ? V3{0.3f, 0.6f, 0.35f} : V3{0.8f, 0.8f, 0.8f};
-    }
+    if (isUIKind(kind)) e.pos = dp;
+    else if (isHelperKind(kind)) e.pos = {target.x, target.y + 2.f, target.z + (kind == KIND_CAMERA ? 6.f : 0.f)};
+    else e.pos = {target.x, -MESH_Y0[kind], target.z};
+    if (kind == KIND_CAMERA) e.look = target;
     ents.push_back(e);
     return e.id;
 }
@@ -1499,37 +2292,41 @@ void Game::drawMenu(ImGuiWindowFlags F) {
     bool doCreate = false;
     ImGui::SetNextWindowPos(ImVec2(0.12f * W, 0.04f * H));
     ImGui::SetNextWindowSize(ImVec2(0.76f * W, 0.92f * H));
-    ImGui::Begin("3gine - Projects", nullptr, F);
-    ImGui::TextWrapped("Projects folder: %s", baseDir.empty() ? "(none)" : baseDir.c_str());
+    ImGui::Begin(lab(tr(S_PROJECTS), "projects").c_str(), nullptr, F);
+    ImGui::TextWrapped("%s", baseDir.empty() ? "(none)" : baseDir.c_str());
     if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
     ImGui::Separator();
     if (ImGui::BeginChild("plist", ImVec2(0, H * 0.5f), 0)) {
-        if (projects.empty()) ImGui::TextWrapped("No projects yet. Press Create to make one.");
+        if (projects.empty()) ImGui::TextWrapped("%s", tr(S_NO_PROJECTS));
         for (int i = 0; i < (int)projects.size(); i++)
             if (ImGui::Selectable(projects[i].c_str(), menuSel == i)) menuSel = i;
     }
     ImGui::EndChild();
-    if (ImGui::Button("Create")) doCreate = true;
+    if (ImGui::Button(tr(S_CREATE))) doCreate = true;
     ImGui::SameLine();
-    if (ImGui::Button("Open") && menuSel >= 0 && menuSel < (int)projects.size()) openProject(projects[menuSel]);
+    if (ImGui::Button(tr(S_OPEN)) && menuSel >= 0 && menuSel < (int)projects.size()) openProject(projects[menuSel]);
     ImGui::SameLine();
-    if (ImGui::Button("Refresh")) refreshProjects();
+    if (ImGui::Button(tr(S_REFRESH))) refreshProjects();
+    ImGui::SameLine();
+    if (ImGui::Button(tr(S_IMPORT))) openBrowser(*this, "3ne");
+    ImGui::SameLine();
+    if (ImGui::Button(tr(S_DEPOT))) showDepot = true;
     ImGui::End();
 
-    if (doCreate) { nameBuf[0] = 0; ImGui::OpenPopup("New project"); }
+    if (doCreate) { nameBuf[0] = 0; status.clear(); ImGui::OpenPopup("New project"); }
     ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.03f), ImGuiCond_Always, ImVec2(0.5f, 0.f));
     ImGui::SetNextWindowSize(ImVec2(W * 0.7f, 0));
     if (ImGui::BeginPopupModal("New project", nullptr, ImGuiWindowFlags_NoResize)) {
-        ImGui::TextUnformatted("Project name:");
+        ImGui::TextUnformatted(tr(S_NAME));
         if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
         ImGui::InputText("##pname", nameBuf, sizeof nameBuf, ImGuiInputTextFlags_CharsNoBlank);
-        ImGui::TextWrapped("Saved in: %s%s/", baseDir.c_str(), cleanName(nameBuf).c_str());
+        ImGui::TextWrapped("%s%s/", baseDir.c_str(), cleanName(nameBuf).c_str());
         if (!status.empty()) ImGui::TextWrapped("%s", status.c_str());
-        if (ImGui::Button("Create")) {
+        if (ImGui::Button(tr(S_CREATE))) {
             if (createProject(nameBuf)) ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) { status.clear(); ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button(tr(S_CANCEL))) { status.clear(); ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
 }
@@ -1575,19 +2372,25 @@ void Game::drawEditorUI() {
                                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings;
     float W = (float)w, H = (float)h, topH = 0.12f * H;
 
-    if (screen == SCREEN_MENU) { drawMenu(F); return; }
+    if (screen == SCREEN_WELCOME) { drawWelcome(F); return; }
+    if (screen == SCREEN_MENU) {
+        drawMenu(F);
+        if (showDepot) drawDepot(F);
+        if (showBrowser) drawBrowser(F);
+        return;
+    }
 
     if (mode == MODE_PLAY) {
         ImGui::SetNextWindowPos(ImVec2(0.86f * W, 0));
         ImGui::SetNextWindowSize(ImVec2(0.14f * W, topH));
         ImGui::Begin("##play", nullptr, F | ImGuiWindowFlags_NoTitleBar);
-        if (ImGui::Button("Stop", ImVec2(-1, -1))) stopPlay();
+        if (ImGui::Button(tr(S_STOP), ImVec2(-1, -1))) stopPlay();
         ImGui::End();
         if (!status.empty()) ImGui::GetForegroundDrawList()->AddText(ImVec2(10, topH), IM_COL32(255, 90, 90, 255), status.c_str());
         return;
     }
 
-    bool doPlay = false, doBuild = false, doDup = false, doMenu = false, doNewScript = false, doEditScript = false;
+    bool doPlay = false, doBuild = false, doBackup = false, doDup = false, doMenu = false, doNewScript = false, doEditScript = false;
     int doAdd = -1;
     std::string goScene, newScene;
 
@@ -1595,39 +2398,50 @@ void Game::drawEditorUI() {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(W, topH));
     ImGui::Begin("##top", nullptr, F | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoScrollbar);
-    if (ImGui::Button("Menu")) doMenu = true;
-    ImGui::SameLine(); if (ImGui::Button("Play")) doPlay = true;
-    ImGui::SameLine(); if (ImGui::Button("Save")) saveProject();
-    ImGui::SameLine(); if (ImGui::Button("Build APK")) doBuild = true;
-    ImGui::SameLine(); if (ImGui::Button("+ Add")) ImGui::OpenPopup("addpop");
+    if (ImGui::Button(tr(S_MENU))) doMenu = true;
+    ImGui::SameLine(); if (ImGui::Button(tr(S_PLAY))) doPlay = true;
+    ImGui::SameLine(); if (ImGui::Button(tr(S_PREPARE))) doBuild = true;
+    ImGui::SameLine(); if (ImGui::Button(tr(S_SAVE))) saveProject();
+    ImGui::SameLine(); if (ImGui::Button(tr(S_ADD))) ImGui::OpenPopup("addpop");
     if (ImGui::BeginPopup("addpop")) {
         for (int i = 0; i < KIND_COUNT; i++) if (ImGui::Selectable(ADD_NAMES[i])) doAdd = i;
         ImGui::EndPopup();
     }
-    ImGui::SameLine(); if (ImGui::Button("Scenes")) ImGui::OpenPopup("scenespop");
+    ImGui::SameLine(); if (ImGui::Button(tr(S_SCENES))) ImGui::OpenPopup("scenespop");
     if (ImGui::BeginPopup("scenespop")) {
         for (const auto& sn : listScenes()) {
-            char lab[96]; snprintf(lab, sizeof lab, "%s%s###sc_%s", sn == sceneName ? "> " : "", sn.c_str(), sn.c_str());
-            if (ImGui::Selectable(lab)) goScene = sn;
+            std::string l = (sn == sceneName ? "> " : "") + sn + "###sc_" + sn;
+            if (ImGui::Selectable(l.c_str())) goScene = sn;
         }
         ImGui::Separator();
         ImGui::InputText("##newscene", sceneBuf, sizeof sceneBuf, ImGuiInputTextFlags_CharsNoBlank);
-        if (ImGui::Button("+ New scene") && cleanName(sceneBuf).size() > 0) { newScene = cleanName(sceneBuf); sceneBuf[0] = 0; }
+        if (ImGui::Button(lab(tr(S_NEW_SCENE), "newscene").c_str()) && !cleanName(sceneBuf).empty()) { newScene = cleanName(sceneBuf); sceneBuf[0] = 0; }
         ImGui::EndPopup();
     }
-    ImGui::SameLine(); if (ImGui::Button("Mods")) { addons = scanAddons(); showAddons = true; }
-    ImGui::SameLine(); ImGui::Text("%s / %s", projectName.c_str(), sceneName.c_str());
+    ImGui::SameLine();
+    {
+        std::string sl = std::string(tr(S_SNAP)) + ": " + (snapIdx == 0 ? tr(S_OFF) : (snapIdx == 1 ? "0.5" : "1.0")) + "###snap";
+        if (ImGui::Button(sl.c_str())) snapIdx = (snapIdx + 1) % 3;
+    }
+    ImGui::SameLine(); if (ImGui::Button(tr(S_MORE))) ImGui::OpenPopup("morepop");
+    if (ImGui::BeginPopup("morepop")) {
+        if (ImGui::Selectable(tr(S_MODS))) { addons = scanAddons(); showAddons = true; }
+        if (ImGui::Selectable(tr(S_DEPOT))) showDepot = true;
+        if (ImGui::Selectable(tr(S_BACKUP))) doBackup = true;
+        ImGui::EndPopup();
+    }
+    ImGui::Text("%s / %s  [%s]", projectName.c_str(), sceneName.c_str(), forwardMode ? "Forward" : "Unlit");
     ImGui::SameLine(); ImGui::TextUnformatted(status.c_str());
     ImGui::End();
 
     // ---- scene list (grouped by folder, children indented under their parent) ----
     ImGui::SetNextWindowPos(ImVec2(0, topH));
     ImGui::SetNextWindowSize(ImVec2(0.25f * W, H - topH));
-    ImGui::Begin("Scene", nullptr, F);
+    ImGui::Begin(lab(tr(S_SCENE_LIST), "scenelist").c_str(), nullptr, F);
     {
         auto row = [&](const Entity& e) {
             int depth = 0;
-            for (int c = e.parent; c > 0 && c <= (int)ents.size() && depth < 8 && e.meshId < MESH_COUNT; c = ents[c - 1].parent) depth++;
+            for (int c = e.parent; c > 0 && c <= (int)ents.size() && depth < 8 && !isUIKind(e.meshId); c = ents[c - 1].parent) depth++;
             if (depth) ImGui::Indent(depth * 18.f);
             char label[200];
             snprintf(label, sizeof label, "%s%s%s###e%d", e.hidden ? "(H) " : "", e.locked ? "(L) " : "", e.name.c_str(), e.id);
@@ -1650,73 +2464,117 @@ void Game::drawEditorUI() {
     // ---- inspector ----
     ImGui::SetNextWindowPos(ImVec2(0.70f * W, topH));
     ImGui::SetNextWindowSize(ImVec2(0.30f * W, H - topH));
-    ImGui::Begin("Inspector", nullptr, F);
+    ImGui::Begin(lab(tr(S_INSPECTOR), "inspector").c_str(), nullptr, F);
     Entity* se = (selected >= 1 && selected <= (int)ents.size() && ents[selected - 1].alive) ? &ents[selected - 1] : nullptr;
-    if (!se) ImGui::TextWrapped("Tap an object in the scene or in the list.");
+    if (!se) ImGui::TextWrapped("%s", tr(S_TAP_HINT));
     else {
-        ImGui::Checkbox("Hide", &se->hidden);
+        ImGui::Checkbox(lab(tr(S_HIDE), "hide").c_str(), &se->hidden);
         ImGui::SameLine();
-        ImGui::Checkbox("Lock", &se->locked);
+        ImGui::Checkbox(lab(tr(S_LOCK), "lock").c_str(), &se->locked);
         if (se->locked) ImGui::BeginDisabled();
         char tb[128];
         snprintf(tb, sizeof tb, "%s", se->name.c_str());
-        if (ImGui::InputText("Name", tb, sizeof tb)) se->name = tb;
+        if (ImGui::InputText(lab(tr(S_NAME), "name").c_str(), tb, sizeof tb)) se->name = tb;
         snprintf(tb, sizeof tb, "%s", se->folder.c_str());
-        if (ImGui::InputText("Folder", tb, sizeof tb)) se->folder = tb;
-        bool isUI = se->meshId >= MESH_COUNT;
-        if (isUI) {
-            ImGui::DragFloat2("Pos %", &se->pos.x, 0.2f, -20.f, 120.f);
-            ImGui::DragFloat2("Size %", &se->scale.x, 0.2f, 1.f, 100.f);
+        if (ImGui::InputText(lab(tr(S_FOLDER), "folder").c_str(), tb, sizeof tb)) se->folder = tb;
+        int k = se->meshId;
+        if (k == KIND_BUTTON || k == KIND_LABEL) {
+            ImGui::DragFloat2(lab(tr(S_POS), "p2").c_str(), &se->pos.x, 0.2f, -20.f, 120.f);
+            ImGui::DragFloat2(lab(tr(S_SIZE), "s2").c_str(), &se->scale.x, 0.2f, 1.f, 100.f);
             snprintf(tb, sizeof tb, "%s", se->text.c_str());
             if (ImGui::InputText("Text", tb, sizeof tb)) se->text = tb;
-            ImGui::ColorEdit3("Color", &se->color.x);
-        } else {
-            std::string pn = "(none)";
-            if (se->parent >= 1 && se->parent <= (int)ents.size() && ents[se->parent - 1].alive) pn = ents[se->parent - 1].name;
-            ImGui::Text("Parent: %s", pn.c_str());
+            ImGui::ColorEdit3(lab(tr(S_COLOR), "col").c_str(), &se->color.x);
+        } else if (k == KIND_JOYSTICK) {
+            ImGui::DragFloat2(lab(tr(S_POS), "p2").c_str(), &se->pos.x, 0.2f, -20.f, 120.f);
+            ImGui::DragFloat(lab(tr(S_SIZE), "s1").c_str(), &se->scale.x, 0.2f, 8.f, 80.f);
+            ImGui::ColorEdit3(lab(tr(S_COLOR), "col").c_str(), &se->color.x);
+            ImGui::TextWrapped("Lua: joystick_x, joystick_y (-1..1)");
+        } else if (k == KIND_IMAGE) {
+            ImGui::DragFloat2(lab(tr(S_POS), "p2").c_str(), &se->pos.x, 0.2f, -20.f, 120.f);
+            ImGui::DragFloat2(lab(tr(S_SIZE), "s2").c_str(), &se->scale.x, 0.2f, 1.f, 100.f);
+            if (ImGui::BeginCombo(lab(tr(S_IMAGE), "img").c_str(), se->img.empty() ? "(none)" : se->img.c_str())) {
+                for (const auto& f : listDir(depotDir + "img/", false)) if (ImGui::Selectable(f.c_str(), se->img == f)) se->img = f;
+                ImGui::EndCombo();
+            }
+        } else if (k == KIND_CAMERA) {
+            ImGui::DragFloat3(lab(tr(S_POS), "p3").c_str(), &se->pos.x, 0.05f);
+            std::string tn = "(point)";
+            if (se->lookId >= 1 && se->lookId <= (int)ents.size() && ents[se->lookId - 1].alive) tn = ents[se->lookId - 1].name;
+            ImGui::DragFloat3(lab(tr(S_LOOK_AT), "look").c_str(), &se->look.x, 0.05f);
+            ImGui::Text("-> %s", tn.c_str());
             ImGui::SameLine();
-            if (ImGui::Button("Set")) ImGui::OpenPopup("parentpop");
-            if (ImGui::BeginPopup("parentpop")) {
-                if (ImGui::Selectable("(none)")) setParent(se->id, 0);
+            if (ImGui::Button(lab(tr(S_SET), "lookset").c_str())) ImGui::OpenPopup("lookpop");
+            if (ImGui::BeginPopup("lookpop")) {
+                if (ImGui::Selectable("(point)")) se->lookId = 0;
                 for (const auto& o : ents) {
-                    if (!o.alive || o.id == se->id || o.meshId >= MESH_COUNT) continue;
-                    char lab[200]; snprintf(lab, sizeof lab, "%s###par%d", o.name.c_str(), o.id);
-                    if (ImGui::Selectable(lab)) { if (!setParent(se->id, o.id)) status = "That would make a loop."; }
+                    if (!o.alive || o.id == se->id || isUIKind(o.meshId)) continue;
+                    char l[200]; snprintf(l, sizeof l, "%s###lk%d", o.name.c_str(), o.id);
+                    if (ImGui::Selectable(l)) se->lookId = o.id;
                 }
                 ImGui::EndPopup();
             }
-            ImGui::DragFloat3("Pos", &se->pos.x, 0.05f);
-            ImGui::DragFloat3("Size", &se->scale.x, 0.05f, 0.01f, 500.f);
+            ImGui::SliderFloat(lab(tr(S_FOV), "fov").c_str(), &se->fov, 0.3f, 1.6f);
+            ImGui::TextWrapped("While playing, the first Camera object is the view.");
+        } else if (k == KIND_LIGHT) {
+            ImGui::DragFloat3(lab(tr(S_POS), "p3").c_str(), &se->pos.x, 0.05f);
+            ImGui::ColorEdit3(lab(tr(S_COLOR), "col").c_str(), &se->color.x);
+            ImGui::SliderFloat(lab(tr(S_INTENSITY), "int").c_str(), &se->intensity, 0.f, 5.f);
+            ImGui::SliderFloat(lab(tr(S_RANGE), "rng").c_str(), &se->range, 1.f, 50.f);
+            ImGui::TextWrapped("The first light switches the renderer from Unlit to Forward.");
+        } else {
+            std::string pn = "(none)";
+            if (se->parent >= 1 && se->parent <= (int)ents.size() && ents[se->parent - 1].alive) pn = ents[se->parent - 1].name;
+            ImGui::Text("%s: %s", tr(S_PARENT), pn.c_str());
+            ImGui::SameLine();
+            if (ImGui::Button(lab(tr(S_SET), "parset").c_str())) ImGui::OpenPopup("parentpop");
+            if (ImGui::BeginPopup("parentpop")) {
+                if (ImGui::Selectable("(none)")) setParent(se->id, 0);
+                for (const auto& o : ents) {
+                    if (!o.alive || o.id == se->id || isUIKind(o.meshId)) continue;
+                    char l[200]; snprintf(l, sizeof l, "%s###par%d", o.name.c_str(), o.id);
+                    if (ImGui::Selectable(l)) { if (!setParent(se->id, o.id)) status = "That would make a loop."; }
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::DragFloat3(lab(tr(S_POS), "p3").c_str(), &se->pos.x, 0.05f);
+            ImGui::DragFloat3(lab(tr(S_SIZE), "s3").c_str(), &se->scale.x, 0.05f, 0.01f, 500.f);
             float deg = se->rotY * 57.29578f;
-            if (ImGui::SliderFloat("Rot", &deg, -180.f, 180.f)) se->rotY = deg / 57.29578f;
-            ImGui::ColorEdit3("Color", &se->color.x);
+            if (ImGui::SliderFloat(lab(tr(S_ROT), "rot").c_str(), &deg, -180.f, 180.f)) se->rotY = deg / 57.29578f;
+            ImGui::ColorEdit3(lab(tr(S_COLOR), "col").c_str(), &se->color.x);
+            if (ImGui::BeginCombo(lab(tr(S_MATERIAL), "mat").c_str(), se->material.c_str())) {
+                for (const char* m : MATERIALS) if (ImGui::Selectable(m, se->material == m)) se->material = m;
+                for (const auto& f : depot.list("material")) if (ImGui::Selectable(f.c_str(), se->material == f)) se->material = f;
+                ImGui::EndCombo();
+            }
             ImGui::SliderFloat("Spin", &se->spin, -5.f, 5.f);
             ImGui::SliderFloat("Sway", &se->sway, 0.f, 1.f);
             ImGui::SliderFloat("Shadow", &se->shadow, 0.f, 10.f);
         }
         ImGui::Separator();
-        ImGui::Text("Script: %s", se->script.empty() ? "(none)" : se->script.c_str());
-        if (ImGui::Button("New")) doNewScript = true;
-        ImGui::SameLine(); if (ImGui::Button("Pick")) ImGui::OpenPopup("pickscript");
+        ImGui::Text("%s: %s", tr(S_SCRIPT), se->script.empty() ? "(none)" : se->script.c_str());
+        if (ImGui::Button(tr(S_NEW))) doNewScript = true;
+        ImGui::SameLine(); if (ImGui::Button(tr(S_PICK))) ImGui::OpenPopup("pickscript");
         if (!se->script.empty()) {
-            ImGui::SameLine(); if (ImGui::Button("Edit")) doEditScript = true;
-            ImGui::SameLine(); if (ImGui::Button("Clear")) se->script.clear();
+            ImGui::SameLine(); if (ImGui::Button(tr(S_EDIT))) doEditScript = true;
+            ImGui::SameLine(); if (ImGui::Button(tr(S_CLEAR))) se->script.clear();
         }
         if (ImGui::BeginPopup("pickscript")) {
             std::vector<std::string> sc = listScripts();
-            if (sc.empty()) ImGui::TextUnformatted("No scripts yet - press New.");
+            if (sc.empty()) ImGui::TextUnformatted("-");
             for (const auto& n : sc) if (ImGui::Selectable(n.c_str())) se->script = n;
             ImGui::EndPopup();
         }
         ImGui::Separator();
-        if (ImGui::Button("Duplicate")) doDup = true;
+        if (ImGui::Button(tr(S_DUPLICATE))) doDup = true;
         ImGui::SameLine();
-        if (ImGui::Button("Delete")) { destroyEntity(se->id); selected = 0; }
+        if (ImGui::Button(tr(S_DELETE))) { destroyEntity(se->id); selected = 0; }
         if (se->locked) ImGui::EndDisabled();
     }
     ImGui::End();
 
     if (showAddons) drawAddons(F);
+    if (showDepot) drawDepot(F);
+    if (showBrowser) drawBrowser(F);
 
     // ---- script editor (top half; the keyboard covers the lower half) ----
     if (codeOpen) {
@@ -1724,9 +2582,9 @@ void Game::drawEditorUI() {
         ImGui::SetNextWindowSize(ImVec2(W, 0.5f * H));
         char title[160]; snprintf(title, sizeof title, "Script: %s.lua###code", codeName.c_str());
         ImGui::Begin(title, nullptr, F);
-        if (ImGui::Button("Save")) saveCode();
+        if (ImGui::Button(tr(S_SAVE))) saveCode();
         ImGui::SameLine();
-        if (ImGui::Button("Save & Close")) { saveCode(); codeOpen = false; }
+        if (ImGui::Button(lab(tr(S_SAVE_CLOSE), "savecl").c_str())) { saveCode(); codeOpen = false; }
         static const char* SYM[] = {"(", ")", "{", "}", "[", "]", "\"", "'", "=", ",", ".", ":", "_", "#", "+", "-", "*", "/", "<", ">", "~"};
         for (int i = 0; i < (int)(sizeof SYM / sizeof SYM[0]); i++) {
             if (i != 0) ImGui::SameLine();
@@ -1740,10 +2598,13 @@ void Game::drawEditorUI() {
         ImGui::End();
     }
 
-    // ---- build popup ----
+    // ---- move gizmo ----
+    if (!codeOpen && !showAddons && !showDepot && !showBrowser) drawGizmo();
+
+    // ---- prepare for APK / backup ----
     if (doBuild) {
         saveProject();
-        writeFile(baseDir + "startup.txt", projectName + "\n");  // tells CI which project to bundle in the game APK
+        writeFile(baseDir + "startup.txt", projectName + "\n");  // names the project bundled in the game APK
         mkdirs(projectDir + "addons/");  // required Lua addons travel with the game
         addons = scanAddons();
         for (const auto& id : reqs)
@@ -1752,7 +2613,13 @@ void Game::drawEditorUI() {
                     std::string src;
                     if (readFile(a.dir + a.file, src)) writeFile(projectDir + "addons/" + id + ".lua", src);
                 }
-        ImGui::OpenPopup("Build APK");
+        std::string outp;
+        status = prepareApk(outp) ? "Ready: " + outp : status;
+        ImGui::OpenPopup("Prepare for APK");
+    }
+    if (doBackup) {
+        std::string outp;
+        status = exportBackup(outp) ? "Backup: " + outp : "Backup failed";
     }
     if (doPlay) {
         std::string miss = checkRequires();
@@ -1760,15 +2627,14 @@ void Game::drawEditorUI() {
     }
     ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(W * 0.7f, 0));
-    if (ImGui::BeginPopupModal("Build APK", nullptr, ImGuiWindowFlags_NoResize)) {
+    if (ImGui::BeginPopupModal("Prepare for APK", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::TextWrapped("%s", status.c_str());
-        ImGui::TextWrapped("Project '%s' saved in:\n%s", projectName.c_str(), projectDir.c_str());
         ImGui::Separator();
-        ImGui::TextWrapped("To get the game APK: open Termux in your repo and run  sh publish.sh  "
-                           "GitHub Actions then compiles it; download the artifact 3gine-game-apk from the Actions page.");
+        ImGui::TextWrapped("Extract that zip into a GitHub repository (or run  sh publish.sh  in your repo). "
+                           "GitHub Actions compiles it; download the artifact 3gine-game-apk from the Actions page.");
         ImGui::TextWrapped("An APK cannot be compiled on the phone itself (it needs the Android SDK/NDK toolchain), "
-                           "so GitHub does the compiling. Required .lua addons are copied into the project; .so addons are not bundled.");
-        if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+                           "so the project is prepared here and GitHub does the compiling. Required .lua addons are included; .so addons are not.");
+        if (ImGui::Button(tr(S_OK), ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1776,8 +2642,8 @@ void Game::drawEditorUI() {
     if (ImGui::BeginPopupModal("Mods missing", nullptr, ImGuiWindowFlags_NoResize)) {
         ImGui::TextWrapped("The game was not started. This project requires mods that are missing or disabled:");
         ImGui::TextWrapped("%s", modError.c_str());
-        ImGui::TextWrapped("Open Mods to enable them, or copy the files into %s", addonsDir.c_str());
-        if (ImGui::Button("OK", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+        ImGui::TextWrapped("Open More > Mods to enable them, or copy the files into %s", addonsDir.c_str());
+        if (ImGui::Button(tr(S_OK), ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
 
@@ -1798,7 +2664,7 @@ void Game::drawEditorUI() {
     if (doDup && selected >= 1 && selected <= (int)ents.size()) {
         Entity c = ents[selected - 1];
         c.id = (int)ents.size() + 1;
-        if (c.meshId >= MESH_COUNT) c.pos.y += 5.f; else c.pos.x += 1.f;
+        if (isUIKind(c.meshId)) c.pos.y += 5.f; else c.pos.x += 1.f;
         ents.push_back(c); selected = c.id;
     }
     if (doNewScript && selected >= 1) newScriptFor(selected);
@@ -1820,6 +2686,7 @@ struct Platform {
     float downX = 0, downY = 0, moved = 0;
     bool gameTouch = true;
     bool kbd = false;
+    bool gizmo = false;
 };
 
 // Shows / hides the Android soft keyboard through JNI (no Java code needed).
@@ -1880,6 +2747,54 @@ static int keyToChar(int code, bool shift) {
     return 0;
 }
 
+// ---- sound: android.media.MediaPlayer through JNI (mp3 / ogg / wav) ----
+static JavaVM* g_vm = nullptr;
+static std::vector<jobject> g_players;
+static void releasePlayer(JNIEnv* env, jobject mp) {
+    jclass cls = env->GetObjectClass(mp);
+    jmethodID stop = env->GetMethodID(cls, "stop", "()V");
+    jmethodID rel = env->GetMethodID(cls, "release", "()V");
+    if (stop) env->CallVoidMethod(mp, stop);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (rel) env->CallVoidMethod(mp, rel);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteGlobalRef(mp);
+}
+static bool playSoundFile(const std::string& path, bool loop) {
+    if (!g_vm) return false;
+    JNIEnv* env = nullptr;
+    if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return false;
+    bool ok = false;
+    jclass cls = env->FindClass("android/media/MediaPlayer");
+    if (cls) {
+        jmethodID ctor = env->GetMethodID(cls, "<init>", "()V");
+        jobject mp = env->NewObject(cls, ctor);
+        if (mp && !env->ExceptionCheck()) {
+            jmethodID setDS = env->GetMethodID(cls, "setDataSource", "(Ljava/lang/String;)V");
+            jmethodID prep = env->GetMethodID(cls, "prepare", "()V");
+            jmethodID setLoop = env->GetMethodID(cls, "setLooping", "(Z)V");
+            jmethodID start = env->GetMethodID(cls, "start", "()V");
+            jstring js = env->NewStringUTF(path.c_str());
+            env->CallVoidMethod(mp, setDS, js);
+            if (!env->ExceptionCheck()) env->CallVoidMethod(mp, prep);
+            if (!env->ExceptionCheck()) { env->CallVoidMethod(mp, setLoop, (int)(loop ? 1 : 0)); env->CallVoidMethod(mp, start); }
+            if (!env->ExceptionCheck()) { g_players.push_back(env->NewGlobalRef(mp)); ok = true; }
+            else env->ExceptionClear();
+        } else if (env->ExceptionCheck()) env->ExceptionClear();
+    } else if (env->ExceptionCheck()) env->ExceptionClear();
+    while (g_players.size() > 12) { releasePlayer(env, g_players.front()); g_players.erase(g_players.begin()); }
+    g_vm->DetachCurrentThread();
+    return ok;
+}
+static void stopAllSounds() {
+    if (!g_vm || g_players.empty()) return;
+    JNIEnv* env = nullptr;
+    if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
+    for (jobject mp : g_players) releasePlayer(env, mp);
+    g_players.clear();
+    g_vm->DetachCurrentThread();
+}
+
 static bool initGL(Platform& p) {
     p.dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(p.dpy, nullptr, nullptr);
@@ -1899,7 +2814,16 @@ static bool initGL(Platform& p) {
     eglQuerySurface(p.dpy, p.surf, EGL_WIDTH, &p.game.w);
     eglQuerySurface(p.dpy, p.surf, EGL_HEIGHT, &p.game.h);
     ImGui::CreateContext();
-    ImGui::GetIO().IniFilename = nullptr;
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    {  // a system font with Latin Extended + Cyrillic glyphs (Turkish, German, Russian ... text)
+        static const ImWchar ranges[] = {0x0020, 0x00FF, 0x0100, 0x017F, 0x0400, 0x04FF, 0};
+        const char* fonts[] = {"/system/fonts/Roboto-Regular.ttf", "/system/fonts/RobotoStatic-Regular.ttf",
+                               "/system/fonts/NotoSans-Regular.ttf", "/system/fonts/DroidSans.ttf"};
+        p.game.customFont = false;
+        for (const char* f : fonts)
+            if (access(f, R_OK) == 0 && io.Fonts->AddFontFromFileTTF(f, 28.0f, nullptr, ranges)) { p.game.customFont = true; break; }
+    }
     ImGui::StyleColorsDark();
     ImGui::GetStyle().ScaleAllSizes(2.0f);
     ImGui_ImplAndroid_Init(p.app->window);
@@ -1959,23 +2883,38 @@ static int32_t onInput(android_app* app, AInputEvent* e) {
     if (act == AMOTION_EVENT_ACTION_DOWN) {
         p->gameTouch = g.inViewport(x, y);  // touches that start on a UI panel never reach the game
         p->downX = x; p->downY = y; p->moved = 0; p->lastX = x; p->lastY = y; p->lastPinch = 0;
+#ifndef GAME_MODE
+        p->gizmo = p->gameTouch && g.mode == MODE_EDIT && g.screen == SCREEN_PROJECT && g.gizmoBegin(x, y);  // grabbed an axis arrow?
+#endif
     }
     if (!p->gameTouch) { p->lastX = x; p->lastY = y; return 1; }
+#ifndef GAME_MODE
+    if (p->gizmo) {  // dragging an axis arrow: move the selected object (snapped), never orbit or pick
+        if (act == AMOTION_EVENT_ACTION_MOVE) g.gizmoMove(x - p->lastX, y - p->lastY);
+        else if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_CANCEL) { g.gizmoEnd(); p->gizmo = false; }
+        p->lastX = x; p->lastY = y;
+        return 1;
+    }
+#endif
 
     if (act == AMOTION_EVENT_ACTION_DOWN) {
         g.touchDown = true; g.touchX = x; g.touchY = y;
         g.uiDownId = (g.mode == MODE_PLAY) ? g.uiAt(x, y, false) : 0;
+        g.joyActive = g.uiDownId && g.ents[g.uiDownId - 1].meshId == KIND_JOYSTICK;
+        if (g.joyActive) g.updateJoystick(x, y);
     } else if (act == AMOTION_EVENT_ACTION_UP || act == AMOTION_EVENT_ACTION_CANCEL) {
         g.touchDown = false;
-        if (act == AMOTION_EVENT_ACTION_UP && g.mode == MODE_PLAY && g.uiDownId && g.uiAt(x, y, false) == g.uiDownId)
+        if (act == AMOTION_EVENT_ACTION_UP && g.mode == MODE_PLAY && g.uiDownId && g.ents[g.uiDownId - 1].meshId == KIND_BUTTON && g.uiAt(x, y, false) == g.uiDownId)
             g.clickUI(g.uiDownId);  // a tap on a UI button runs its on_click()
 #ifndef GAME_MODE
         if (act == AMOTION_EVENT_ACTION_UP && g.mode == MODE_EDIT && p->moved < 25.f) g.pick(x, y);
 #endif
+        g.joyActive = false; g.joyX = g.joyY = 0;
         g.uiDownId = 0;
     } else if (act == AMOTION_EVENT_ACTION_MOVE) {
         g.touchDX += x - p->lastX; g.touchDY += y - p->lastY; g.touchX = x; g.touchY = y;
         p->moved += std::fabs(x - p->lastX) + std::fabs(y - p->lastY);
+        if (g.joyActive) g.updateJoystick(x, y);
     }
 
     if (g.orbit && !g.uiDownId) {
@@ -2008,6 +2947,7 @@ static double nowSec() {
 
 void android_main(android_app* app) {
     Platform p; p.app = app;
+    g_vm = app->activity->vm;
     p.game.assets = app->activity->assetManager;
     if (app->activity->externalDataPath) p.game.fallbackDir = std::string(app->activity->externalDataPath) + "/";
     if (app->activity->internalDataPath) p.game.internalDir = app->activity->internalDataPath;

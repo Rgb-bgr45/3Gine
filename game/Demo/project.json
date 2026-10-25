@@ -1,4 +1,4 @@
 {
   "name": "Demo",
-  "requires": []
+  "requires": ["3sics"]
 }
